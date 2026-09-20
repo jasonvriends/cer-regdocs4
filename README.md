@@ -26,13 +26,26 @@ CER filings and are documented where they are non-obvious.
 .venv/bin/python ingest.py <pdf> --force  # re-ingest after changing settings
 ```
 
-Output lands in `output/<id>/`:
+Output is written per **run of settings**, not per document:
 
-| file | contents |
-|------|----------|
-| `<id>.docling.json.gz` | the document: structure, tables, provenance |
-| `<id>.docling.meta.json` | provenance, settings, timing, per-page quality and doubts |
-| `<id>.docling.index.json` | headings and tables, to query a corpus without opening documents |
+```
+output/<id>/
+  runs.json                       one line per run: settings in, results out
+  <run>/<id>.docling.json.gz      the document: structure, tables, provenance
+  <run>/<id>.docling.meta.json    provenance, settings, per-page quality, doubts
+```
+
+Every setting that changes the output goes into a run signature, and its short
+hash names the directory. The same settings land in the same place and are not
+redone; change one and the next run lands **beside** the old rather than over
+it. Comparing two parameter choices is then reading `runs.json`:
+
+```
+310a9d38  table_mode=fast       28s  suspect_cells=0
+c885606d  table_mode=accurate   44s  suspect_cells=1
+```
+
+`--force` redoes a run that already exists.
 
 Markdown is a lossy projection and is not written; export it from the JSON when
 needed (`doc.export_to_markdown()`).
@@ -91,38 +104,13 @@ trades accuracy for speed; the list is the knob.
   when a new model or docling release fixes one of these, the affected pages
   can be selected across the corpus and re-run without re-converting everything
 
-### The index
+### What the meta does not cover
 
-`<id>.docling.index.json` lists the document's headings, one row per table —
-page, dimensions, column names, caption, and how many body cells are numbers —
-and one row per picture with its caption. The numeric count separates a dataset
-from a table used for layout: water-quality results in this corpus run 66–72%
-numeric, an address block runs 0%. So a table with a `Detection Limit` column is
-findable across a corpus without opening a single 250 MB document.
-
-Conversion runs one page at a time, so **a table continued across pages arrives
-as one table per page** (flagged as `tables_are_per_page`). The index therefore
-also carries a `datasets` roll-up — tables grouped by their set of column names,
-biggest first — which is the view that answers whether a document is worth
-mining at all:
-
-```json
-{"columns": ["Result", "Analyte", "CAS Number Method", "LOR", "Unit", "Qualifier"],
- "tables": 37, "rows": 1217, "first_page": 257, "last_page": 970,
- "numeric_share": 0.27}
-```
-
-One filing's 887 tables reduce to that plus a long tail. Column order is ignored
-when grouping, since the same table can be read with its columns in a different
-order and would otherwise appear as two datasets.
-
-It carries the `run_signature` it was built from. An index derived later, from
-whatever document happens to be on disk, can silently describe a different
-extraction — these outputs changed between runs while the pipeline was tuned.
-
-What a document *is* — a monitoring report, an order — is deliberately absent.
-Those rules change, and a judgement written at extraction time can only be
-corrected by extracting again.
+The meta answers two questions: what produced this output, and what went well or
+badly in it. What the document *contains* — its headings, tables and the
+datasets inside them — is a separate pass over the finished extraction. Those
+rules change on their own schedule, and correcting them should not mean
+re-extracting a corpus.
 
 **An empty warning list means nothing was reported, not that nothing was lost.**
 The worst failure found so far — 315 pages of mojibake — was completely silent.

@@ -3,8 +3,12 @@
 
     ingest.py <pdf-path-or-url> [--force]
 
---force re-ingests a document that was already done under different settings,
-overwriting its output; without it such a run stops and prints what changed.
+Output is written per run of settings, not per document. Every setting that
+changes the output goes into a run signature, and its short hash names the
+directory. The same settings land in the same place and are not redone; change
+one and the next run lands beside the old rather than over it, so the effect of
+a parameter is a diff of two directories instead of a memory of what used to be
+there. --force redoes a run that already exists.
 
 Everything is fixed: a CUDA GPU with 16 GB or more is used when present and the
 CPU (8 threads) otherwise, RapidOCR (full-page on rasterized pages, pdf-aware
@@ -35,9 +39,14 @@ lost. The mojibake above was silent: 315 pages of it, found only by comparing
 against a second extraction of the same filing.
 
 Writes to output/<id>/:
-    <id>.docling.json.gz    the document: structure, tables, provenance
-    <id>.docling.meta.json  source, pages, settings, timing, per-page warnings
-    <id>.docling.index.json headings and tables, to query without the document
+    runs.json                     one line per run: settings in, results out
+    <run>/<id>.docling.json.gz    the document: structure, tables, provenance
+    <run>/<id>.docling.meta.json  provenance, settings, per-page quality, doubts
+
+The meta answers two questions and deliberately not a third: what produced this
+output, and what went well or badly in it. What the document *contains* is a
+separate pass over the finished extraction -- it changes on its own schedule and
+should not require re-extracting a corpus to correct.
 
 Markdown is a lossy projection and is not written here; export it from the JSON
 when it is needed (doc.export_to_markdown()).
@@ -675,173 +684,6 @@ def _median(values: list) -> float:
     return float(vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2)
 
 
-MAX_INDEX_ENTRIES = 5000   # keeps the index a summary, not a second document
-MAX_DATASETS = 200         # distinct table shapes worth listing
-INDEX_SCHEMA = 1
-
-
-def column_names(cells) -> list[str]:
-    """The column names of a table, from a header that may be several rows deep.
-
-    Laboratory reports in this corpus are crosstabs: each sample is a column,
-    and the header stacks the sample's location, date and lab id above the
-    field name. Taking every header cell mixes those in, and since they differ
-    on every page the same table then looks like a different table on each one.
-
-    The field name is the deepest header cell in its column -- "Analyte",
-    "LOR", "Unit", "Result" -- with the identifiers sitting above it. Runs of
-    the same name are collapsed, because a report with five sample columns and
-    one with three are the same table with different sample counts.
-    """
-    deepest: dict = {}
-    for c in cells:
-        if not c.column_header:
-            continue
-        col = c.start_col_offset_idx
-        row = c.start_row_offset_idx
-        if col not in deepest or row > deepest[col][0]:
-            deepest[col] = (row, (c.text or "").strip()[:80])
-    names = [text for _, (_, text) in sorted(deepest.items()) if text]
-    collapsed: list[str] = []
-    for name in names:
-        if not collapsed or collapsed[-1] != name:
-            collapsed.append(name)
-    return collapsed
-
-
-def content_index(doc, doc_id: str, signature: dict, pages: int) -> dict:
-    """What is in the document, so a corpus can be queried without opening it.
-
-    Written beside the meta rather than inside it: the meta is the file someone
-    opens to see how a run went, this is bulk to query across a corpus, and
-    mixing them means neither can be loaded without the other.
-
-    It is a fact about one extraction, not a judgement about the filing, so it
-    carries the run signature it was built from. Derived later from whatever
-    document happens to be on disk, an index can silently describe a different
-    run -- these extractions changed between runs while the pipeline was being
-    tuned. Built here, it cannot.
-
-    What a document *is* -- a monitoring report, an order -- is deliberately
-    absent. Rules for that change, and a judgement written at extraction can
-    only be corrected by extracting again.
-    """
-    labels: dict = {}
-    for item in doc.texts:
-        labels[item.label] = labels.get(item.label, 0) + 1
-
-    headings = []
-    for item in doc.texts:
-        if item.label != "section_header":
-            continue
-        prov = [pr.page_no for pr in item.prov]
-        headings.append({"page": prov[0] if prov else None,
-                         "level": getattr(item, "level", None),
-                         "text": (item.text or "")[:200]})
-
-    def caption_of(item) -> str | None:
-        texts = []
-        for ref in getattr(item, "captions", None) or []:
-            try:
-                texts.append((ref.resolve(doc).text or "").strip())
-            except Exception:
-                continue
-        joined = " ".join(t for t in texts if t)
-        return joined[:200] or None
-
-    tables = []
-    for t in doc.tables:
-        prov = [pr.page_no for pr in t.prov]
-        cells = t.data.table_cells
-        body = [(c.text or "").strip() for c in cells if not c.column_header]
-        numeric = sum(1 for v in body if NUMERIC_CELL.match(v))
-        columns = column_names(cells)
-        tables.append({
-            "page": prov[0] if prov else None,
-            "rows": t.data.num_rows, "cols": t.data.num_cols,
-            "cells": len(cells),
-            # The share of body cells that are numbers separates a dataset from
-            # a table used for layout: water-quality results here run 66-72%,
-            # an address block runs 0%.
-            "numeric_cells": numeric,
-            "columns": columns[:60],
-            # A caption names the dataset better than its columns do --
-            # "Table 3-1 Water Quality Results" against "Station ID | Date".
-            "caption": caption_of(t),
-        })
-
-    # What could be mined from this document, as opposed to what is in it.
-    # One dataset is routinely spread over dozens of tables: conversion is per
-    # page, and the same table continued across pages arrives once per page.
-    # Grouping by the set of column names collapses that back into the thing a
-    # reader cares about -- "a 1,200-row analyte result table over pages
-    # 257-970" rather than 37 separate tables. Column order is ignored, since
-    # the same table can be read with its columns in a different order.
-    groups: dict = {}
-    for t in tables:
-        if not t["columns"]:
-            continue
-        key = tuple(sorted(c.lower() for c in t["columns"] if c))
-        g = groups.setdefault(key, {"columns": t["columns"], "tables": 0,
-                                    "rows": 0, "numeric_cells": 0, "cells": 0,
-                                    "pages": [], "captions": set()})
-        g["tables"] += 1
-        g["rows"] += t["rows"] or 0
-        g["numeric_cells"] += t["numeric_cells"]
-        g["cells"] += t["cells"]
-        if t["page"] is not None:
-            g["pages"].append(t["page"])
-        if t["caption"]:
-            g["captions"].add(t["caption"])
-    datasets = []
-    for g in groups.values():
-        pages = sorted(g["pages"])
-        datasets.append({
-            "columns": g["columns"],
-            "tables": g["tables"], "rows": g["rows"],
-            "first_page": pages[0] if pages else None,
-            "last_page": pages[-1] if pages else None,
-            # Exactly which pages to concatenate. Conversion is per page, so a
-            # dataset arrives as one table per page and something downstream
-            # has to put it back together; this says which ones.
-            "pages": pages[:MAX_INDEX_ENTRIES],
-            "numeric_share": round(g["numeric_cells"] / g["cells"], 3) if g["cells"] else 0.0,
-            "captions": sorted(g["captions"])[:3],
-        })
-    datasets.sort(key=lambda d: -d["rows"])
-
-    pictures = []
-    for pic in doc.pictures:
-        prov = [pr.page_no for pr in pic.prov]
-        pictures.append({"page": prov[0] if prov else None,
-                         "caption": caption_of(pic)})
-    return {
-        "index_schema": INDEX_SCHEMA,
-        "doc_id": doc_id,
-        "generated_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-        "run_signature": signature,
-        "page_count": pages,
-        "labels": dict(sorted(labels.items(), key=lambda kv: -kv[1])),
-        "counts": {"headings": len(headings), "tables": len(tables),
-                   "pictures": len(doc.pictures)},
-        "headings": headings[:MAX_INDEX_ENTRIES],
-        "headings_truncated": max(0, len(headings) - MAX_INDEX_ENTRIES),
-        # The survey view: distinct tables grouped by their columns, biggest
-        # first. This is what says whether a document is worth mining.
-        "datasets": datasets[:MAX_DATASETS],
-        "datasets_truncated": max(0, len(datasets) - MAX_DATASETS),
-        "tables": tables[:MAX_INDEX_ENTRIES],
-        "tables_truncated": max(0, len(tables) - MAX_INDEX_ENTRIES),
-        "pictures": pictures[:MAX_INDEX_ENTRIES],
-        "pictures_truncated": max(0, len(pictures) - MAX_INDEX_ENTRIES),
-        # Conversion runs one page at a time, so a table continued across pages
-        # arrives as one table per page rather than one table. A consumer
-        # stitching a dataset back together matches identical columns on
-        # consecutive pages; nothing here does that for it.
-        "tables_are_per_page": True,
-    }
-
-
 def dropped_cells(records: list[dict]) -> int:
     """Total PDF cells the table matcher could not place, across a page."""
     return sum(r.get("cells_dropped", 0) for r in records
@@ -1234,15 +1076,57 @@ def run_signature() -> dict:
     }
 
 
-def describe_drift(old: dict, new: dict) -> list[str]:
-    lines = []
-    for key in sorted(set(old) | set(new)):
-        a, b = old.get(key), new.get(key)
-        if a != b:
-            if key == "ingest_sha256":
-                a, b = (str(a)[:8] if a else "?"), (str(b)[:8] if b else "?")
-            lines.append(f"  {key}: {a} -> {b}")
-    return lines
+def run_id(signature: dict) -> str:
+    """A short, stable name for one set of settings.
+
+    The same settings always produce the same id, so re-running a document is
+    idempotent; changing any setting produces a different one, so the new run
+    lands beside the old instead of replacing it. Comparing two parameter
+    choices then means reading two directories, not remembering what was in the
+    one that got overwritten.
+    """
+    canonical = json.dumps(signature, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()[:8]
+
+
+def record_run(doc_root: Path, doc_id: str, rid: str, meta: dict) -> None:
+    """Keep one line per run of this document, so runs can be compared.
+
+    Holds what each run was configured to do and what came out of it. A
+    parameter change is then answerable by reading this file rather than by
+    opening two documents and remembering which was which.
+    """
+    path = doc_root / "runs.json"
+    try:
+        book = json.loads(path.read_text()) if path.exists() else {}
+    except Exception:
+        book = {}
+    runs = book.get("runs") or {}
+    runs[rid] = {
+        "run_id": rid,
+        "ingested_at": meta.get("ingested_at"),
+        "elapsed_seconds": meta.get("elapsed_seconds"),
+        "docling_version": meta.get("docling_version"),
+        "run_signature": meta.get("run_signature"),
+        "settings": meta.get("settings"),
+        "result": {
+            "pages": meta.get("page_count"),
+            "warning_counts": meta.get("warning_counts"),
+            "cells_dropped_total": meta.get("cells_dropped_total"),
+            "severe_table_losses": len(meta.get("severe_table_losses") or []),
+            "suspect_cells": meta.get("suspect_cell_total"),
+            "reprocess_pages": meta.get("reprocess_pages"),
+            "doubts": {k: len(v) for k, v in (meta.get("doubts") or {}).items()},
+            "variant_wins": meta.get("variant_wins"),
+            "confidence_mean": meta.get("confidence_mean"),
+            "quality": meta.get("quality"),
+            "page_seconds": meta.get("page_seconds"),
+        },
+    }
+    book.update({"doc_id": doc_id, "latest": rid,
+                 "runs": dict(sorted(runs.items(),
+                                     key=lambda kv: kv[1].get("ingested_at") or ""))})
+    write_atomic(path, json.dumps(book, indent=2) + "\n")
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -1266,32 +1150,19 @@ def main() -> None:
     pdf = fetch_pdf(source, Path("source"))
     doc_id = pdf.stem[:80].replace(" ", "_")
     out = Path("output") / doc_id
+    signature = run_signature()
+    rid = run_id(signature)
+    doc_root, out = out, out / rid
     chunks = out / "chunks"
-    chunks.mkdir(parents=True, exist_ok=True)
     final = out / (f"{doc_id}.docling.json.gz" if COMPRESS_DOCUMENT
                    else f"{doc_id}.docling.json")
-    signature = run_signature()
-    meta_path = out / f"{doc_id}.docling.meta.json"
+    chunks.mkdir(parents=True, exist_ok=True)
+    if final.exists() and not force:
+        log(f"{doc_id}: run {rid} already done -> {final}")
+        return
     if final.exists():
-        previous = {}
-        if meta_path.exists():
-            try:
-                previous = json.loads(meta_path.read_text()).get("run_signature") or {}
-            except Exception:
-                previous = {}
-        drift = describe_drift(previous, signature)
-        if not drift:
-            log(f"{doc_id}: already ingested with these settings -> {final}")
-            return
-        if not force:
-            log(f"{doc_id}: already ingested, but the settings changed:")
-            for line in drift:
-                log(line)
-            log("re-run with --force to overwrite this output")
-            sys.exit(2)
-        log(f"{doc_id}: settings changed and --force given; overwriting")
-        for line in drift:
-            log(line)
+        log(f"{doc_id}: redoing run {rid} (--force)")
+    log(f"{doc_id}: run {rid}")
     total = len(pdfium.PdfDocument(str(pdf)))
 
     device = pick_device()
@@ -1587,9 +1458,6 @@ def main() -> None:
         if report.get("warnings") or report.get("errors") or report.get("warnings_over_cap"):
             chunk_reports.append(report)  # clean chunks are omitted; counts stay exact
 
-    contents = content_index(merged, doc_id, signature, total)
-    write_atomic(out / f"{doc_id}.docling.index.json",
-                 json.dumps(contents, indent=2, ensure_ascii=False) + "\n")
     suspects = suspect_cells(merged)
     suspect_counts = {}
     for f in suspects:
@@ -1634,9 +1502,10 @@ def main() -> None:
     reprocess = {pg for pages in doubt_index.values() for pg in pages}
 
     page_seconds = sorted(r["seconds"] for r in pages_report if r.get("seconds"))
-    write_atomic(out / f"{doc_id}.docling.meta.json", json.dumps({
+    meta = {
         "meta_schema": META_SCHEMA,
         "doc_id": doc_id,
+        "run_id": rid,
         "source": source,
         "pdf_bytes": pdf.stat().st_size,
         "provenance": provenance,
@@ -1647,10 +1516,6 @@ def main() -> None:
         "host": host_environment(device),
         "argv": sys.argv[1:],
         "geometry": geometry,
-        # A pointer and the headline counts; the lists live in the index file
-        # so the meta stays the thing you read rather than bulk to query.
-        "contents": {"index_file": f"{doc_id}.docling.index.json",
-                     **contents["counts"], "labels": contents["labels"]},
         "page_seconds": {
             "min": page_seconds[0] if page_seconds else None,
             "median": _median(page_seconds),
@@ -1741,7 +1606,12 @@ def main() -> None:
             "raster_scale": RASTER_SCALE,
             "raster_policy": "pages whose text layer is unmapped glyph codes",
         },
-    }, indent=2) + "\n")
+    }
+    write_atomic(out / f"{doc_id}.docling.meta.json",
+                 json.dumps(meta, indent=2) + "\n")
+    # One line per run of this document, so the effect of changing a setting
+    # is readable without opening two documents.
+    record_run(doc_root, doc_id, rid, meta)
     log(f"INGESTED {doc_id}: {len(ranges)} chunks in {time.time() - t0:.0f}s -> {out}")
 
 
