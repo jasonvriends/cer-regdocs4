@@ -680,6 +680,35 @@ MAX_DATASETS = 200         # distinct table shapes worth listing
 INDEX_SCHEMA = 1
 
 
+def column_names(cells) -> list[str]:
+    """The column names of a table, from a header that may be several rows deep.
+
+    Laboratory reports in this corpus are crosstabs: each sample is a column,
+    and the header stacks the sample's location, date and lab id above the
+    field name. Taking every header cell mixes those in, and since they differ
+    on every page the same table then looks like a different table on each one.
+
+    The field name is the deepest header cell in its column -- "Analyte",
+    "LOR", "Unit", "Result" -- with the identifiers sitting above it. Runs of
+    the same name are collapsed, because a report with five sample columns and
+    one with three are the same table with different sample counts.
+    """
+    deepest: dict = {}
+    for c in cells:
+        if not c.column_header:
+            continue
+        col = c.start_col_offset_idx
+        row = c.start_row_offset_idx
+        if col not in deepest or row > deepest[col][0]:
+            deepest[col] = (row, (c.text or "").strip()[:80])
+    names = [text for _, (_, text) in sorted(deepest.items()) if text]
+    collapsed: list[str] = []
+    for name in names:
+        if not collapsed or collapsed[-1] != name:
+            collapsed.append(name)
+    return collapsed
+
+
 def content_index(doc, doc_id: str, signature: dict, pages: int) -> dict:
     """What is in the document, so a corpus can be queried without opening it.
 
@@ -726,9 +755,7 @@ def content_index(doc, doc_id: str, signature: dict, pages: int) -> dict:
         cells = t.data.table_cells
         body = [(c.text or "").strip() for c in cells if not c.column_header]
         numeric = sum(1 for v in body if NUMERIC_CELL.match(v))
-        # Columns as a list rather than one joined string: a consumer matching
-        # "Detection Limit" should not have to split prose back apart.
-        columns = [(c.text or "").strip()[:80] for c in cells if c.column_header]
+        columns = column_names(cells)
         tables.append({
             "page": prov[0] if prov else None,
             "rows": t.data.num_rows, "cols": t.data.num_cols,
@@ -774,6 +801,10 @@ def content_index(doc, doc_id: str, signature: dict, pages: int) -> dict:
             "tables": g["tables"], "rows": g["rows"],
             "first_page": pages[0] if pages else None,
             "last_page": pages[-1] if pages else None,
+            # Exactly which pages to concatenate. Conversion is per page, so a
+            # dataset arrives as one table per page and something downstream
+            # has to put it back together; this says which ones.
+            "pages": pages[:MAX_INDEX_ENTRIES],
             "numeric_share": round(g["numeric_cells"] / g["cells"], 3) if g["cells"] else 0.0,
             "captions": sorted(g["captions"])[:3],
         })
