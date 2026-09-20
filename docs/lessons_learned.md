@@ -283,6 +283,47 @@ says plainly that it cannot.
 
 ---
 
+### 4.4 The document is compressed, the meta is not
+
+Two files per run, and the split is deliberate.
+
+**Measured, before deciding:**
+
+| file | plain | gzip | zstd |
+|------|------:|-----:|-----:|
+| `docling.json` | 9.4 MB | **0.9 MB (9%)** | 0.6 MB |
+| `azure.json` | 30.7 MB | 6.6 MB (21%) | 6.7 MB |
+| the source PDF | 7.4 MB | **7.3 MB (98%)** | 7.3 MB |
+
+The document JSON is mostly repeated field names and coordinates and gzips to
+about a tenth. A PDF is already compressed and gains nothing, so source files
+are left alone. Across a hundred thousand documents this is roughly 10 TB
+against 1 TB.
+
+The meta stays plain text. It is the file that gets read -- grepped for a
+warning kind, opened in an editor, loaded in bulk to ask which runs had severe
+table losses. Compressed, every one of those becomes "decompress first", which
+is the same reason the content index was moved out of it.
+
+**Bundling both into one archive per run was considered and not done.** It
+would halve the file count, which is not a problem anyone has, and it would put
+the meta behind an extraction step, which is. The document gains nothing from
+being re-wrapped: it is already deflated, and zipping deflated data adds bytes.
+
+There is a case for one archive per run -- a finished corpus going to cold
+storage, where nothing will be queried in place. That is a step over finished
+output, not the shape ingest writes:
+
+    tar -cf - output/<id>/<run> | zstd -19 -o archive/<id>-<run>.tar.zst
+
+**What actually happened:** the document went from 9.4 MB to 0.9 MB; the meta
+sits at about 150 KB on a 986-page filing, most of it the per-page rows. At a
+hundred thousand documents that is ~15 GB of meta, which stays readable because
+`runs.json` carries the document-level summary -- a meta is only opened when a
+document turns out to be interesting.
+
+---
+
 ## 5. What the pipeline now checks about itself
 
 All of this works without a reference extraction.
