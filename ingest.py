@@ -35,7 +35,7 @@ lost. The mojibake above was silent: 315 pages of it, found only by comparing
 against a second extraction of the same filing.
 
 Writes to output/<id>/:
-    <id>.docling.json       the document: structure, tables, provenance
+    <id>.docling.json.gz    the document: structure, tables, provenance
     <id>.docling.meta.json  source, pages, settings, timing, per-page warnings
 
 Markdown is a lossy projection and is not written here; export it from the JSON
@@ -46,12 +46,14 @@ from __future__ import annotations
 
 import datetime as _dt
 import gc
+import gzip
 import hashlib
 import io
 import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -115,18 +117,43 @@ def pick_device() -> str:
     return "cpu"
 
 
-def fetch_pdf(source: str, dest: Path) -> Path:
+def url_stem(source: str) -> str:
+    """A filename for a downloaded PDF, from the URL.
+
+    REGDOCS download links end in the document id, which is the name this
+    corpus uses everywhere else. Anything else falls back to the last path
+    segment, reduced to characters that are safe in a filename.
+    """
+    from urllib.parse import unquote, urlparse
+
+    tail = unquote(urlparse(source).path.rstrip("/").split("/")[-1])
+    tail = re.sub(r"\.pdf$", "", tail, flags=re.IGNORECASE)
+    cleaned = re.sub(r"[^0-9A-Za-z._-]+", "_", tail).strip("._-")
+    return cleaned[:80] or "download"
+
+
+def fetch_pdf(source: str, into: Path) -> Path:
+    """Return a local path for the source, downloading it if it is a URL.
+
+    Downloads land in the source directory under a name taken from the URL,
+    beside every other PDF in the corpus, so a file fetched once is a file
+    already present the next time and is not downloaded again.
+    """
     if not source.lower().startswith(("http://", "https://")):
         return Path(source)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(".part")
+    into.mkdir(parents=True, exist_ok=True)
+    dest = into / f"{url_stem(source)}.pdf"
+    if dest.exists():
+        log(f"already downloaded -> {dest} ({dest.stat().st_size / 1e6:.1f} MB)")
+        return dest
+    tmp = dest.with_suffix(".pdf.part")
     log(f"downloading {source}")
     subprocess.run([
         "curl", "-fSL", "--retry", "3", "--retry-delay", "5",
         "--max-time", "3600", "-C", "-", "-o", str(tmp), source,
     ], check=True)
-    tmp.rename(dest)
-    log(f"downloaded {dest.stat().st_size / 1e6:.1f} MB")
+    tmp.replace(dest)
+    log(f"downloaded {dest.stat().st_size / 1e6:.1f} MB -> {dest}")
     return dest
 
 
@@ -592,6 +619,7 @@ def page_report(report: dict) -> dict:
         "staging": report.get("staging"),
         "chars": q.get("chars"),
         "alnum_ratio": q.get("alnum_ratio"),
+        "seconds": report.get("elapsed_seconds"),
         "variant_spread": spread,
         "win_margin": margin,
         "variant_scores": {k: round(v, 1) for k, v in scores.items()},
@@ -931,6 +959,67 @@ def verify_regdocs_url(doc_id: str, given: str | None) -> dict:
                 "source_url_check_error": str(exc)}
 
 
+META_SCHEMA = 1   # bumped when the shape of the meta changes
+# The document JSON is mostly repeated field names and coordinates and gzips to
+# about a tenth of its size; the PDF beside it is already compressed and gains
+# nothing from it. The meta stays plain text -- it is the file people open, and
+# it is small. Set false to write the document uncompressed.
+COMPRESS_DOCUMENT = True
+
+
+def host_environment(device: str) -> dict:
+    """The machine and libraries that produced this run.
+
+    OCR is not bit-identical across GPUs, drivers and library versions. When a
+    run is compared against one made years later, the first question is what
+    else changed, and nothing else in the output answers it.
+    """
+    import platform
+
+    env = {
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "device": device,
+        "threads": THREADS,
+    }
+    try:
+        import torch
+
+        env["torch"] = torch.__version__
+        if torch.cuda.is_available():
+            env["gpu"] = torch.cuda.get_device_name(0)
+            env["cuda"] = torch.version.cuda
+            env["gpu_memory_gb"] = round(
+                torch.cuda.get_device_properties(0).total_memory / 1024**3, 1)
+    except Exception as exc:
+        env["torch_probe_error"] = str(exc)
+    return env
+
+
+def page_geometry(pdf: Path, total: int) -> dict:
+    """Page sizes and rotations, summarised.
+
+    A page that extracts oddly is often a page that is rotated, or a different
+    size from the rest of the filing -- a drawing sheet among letter pages.
+    Recording it costs nothing and answers that question without the PDF.
+    """
+    import pypdfium2 as pdfium
+
+    doc = pdfium.PdfDocument(str(pdf))
+    sizes: dict = {}
+    rotations: dict = {}
+    for i in range(total):
+        page = doc[i]
+        w, h = page.get_size()
+        key = f"{round(w)}x{round(h)}"
+        sizes[key] = sizes.get(key, 0) + 1
+        rot = page.get_rotation()
+        rotations[str(rot)] = rotations.get(str(rot), 0) + 1
+    doc.close()
+    return {"sizes": dict(sorted(sizes.items(), key=lambda kv: -kv[1])),
+            "rotations": rotations}
+
+
 def ingest_fingerprint() -> dict:
     """Identify the script that produced a run.
 
@@ -1002,12 +1091,13 @@ def main() -> None:
     if not source or source in ("-h", "--help"):
         sys.exit(__doc__)
 
-    pdf = fetch_pdf(source, Path("output") / "source" / "document.pdf")
+    pdf = fetch_pdf(source, Path("source"))
     doc_id = pdf.stem[:80].replace(" ", "_")
     out = Path("output") / doc_id
     chunks = out / "chunks"
     chunks.mkdir(parents=True, exist_ok=True)
-    final = out / f"{doc_id}.docling.json"
+    final = out / (f"{doc_id}.docling.json.gz" if COMPRESS_DOCUMENT
+                   else f"{doc_id}.docling.json")
     signature = run_signature()
     meta_path = out / f"{doc_id}.docling.meta.json"
     if final.exists():
@@ -1057,6 +1147,7 @@ def main() -> None:
     write_atomic(stamp, json.dumps(signature, indent=2) + "\n")
 
     provenance = pdf_provenance(pdf)
+    geometry = page_geometry(pdf, total)
     provenance.update(verify_regdocs_url(doc_id, source))
     bad_pages = unmapped_pages(pdf, total)
     outline = read_outline(pdf)
@@ -1238,7 +1329,21 @@ def main() -> None:
         merged.name = doc_id
         tmp = out / f"{doc_id}.docling.json.part"
         merged.save_as_json(tmp, image_mode=ImageRefMode.EMBEDDED)
+    if COMPRESS_DOCUMENT:
+        packed = tmp.with_name(tmp.name + ".gz")
+        with tmp.open("rb") as src_f, gzip.open(packed, "wb", compresslevel=6) as dst_f:
+            shutil.copyfileobj(src_f, dst_f, length=1 << 20)
+        tmp.unlink()
+        tmp = packed
     tmp.replace(final)
+    # A run that switches between compressed and plain output would otherwise
+    # leave the previous form sitting beside the new one, and nothing says
+    # which is current.
+    stale_twin = out / (f"{doc_id}.docling.json" if COMPRESS_DOCUMENT
+                        else f"{doc_id}.docling.json.gz")
+    if stale_twin.exists():
+        stale_twin.unlink()
+        log(f"{doc_id}: removed the previous {stale_twin.suffix} output")
 
     # Gather the per-chunk sidecars before the chunk directory goes away.
     chunk_reports, kind_counts = [], {}
@@ -1353,7 +1458,9 @@ def main() -> None:
             doubt_index.setdefault(d, []).append(row["page"])
     reprocess = {pg for pages in doubt_index.values() for pg in pages}
 
+    page_seconds = sorted(r["seconds"] for r in pages_report if r.get("seconds"))
     write_atomic(out / f"{doc_id}.docling.meta.json", json.dumps({
+        "meta_schema": META_SCHEMA,
         "doc_id": doc_id,
         "source": source,
         "pdf_bytes": pdf.stat().st_size,
@@ -1362,6 +1469,14 @@ def main() -> None:
         "chunk_pages": CHUNK_PAGES,
         "docling_version": docling.__version__,
         "ingest": ingest_fingerprint(),
+        "host": host_environment(device),
+        "argv": sys.argv[1:],
+        "geometry": geometry,
+        "page_seconds": {
+            "min": page_seconds[0] if page_seconds else None,
+            "median": _median(page_seconds),
+            "max": page_seconds[-1] if page_seconds else None,
+        },
         "run_signature": signature,
         # Pin the whole stack, not just docling: warning counts are only
         # comparable across runs when these match.
