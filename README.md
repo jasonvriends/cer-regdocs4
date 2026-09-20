@@ -80,6 +80,15 @@ trades accuracy for speed; the list is the knob.
 - `rasterized_page_list`, `retried_pages`, `table_mode_overrides`
 - `run_signature` — hash of `ingest.py` plus the settings that change output; a
   re-run under different settings stops rather than silently overwriting
+- `pages` — **one row per page, for every page**: characters extracted, how
+  character-like they were, which variant won, and how far the variants
+  disagreed. Several ways of reading a page landing in the same place is the
+  closest thing to a confidence measure available without a second extractor.
+- `doubts` / `reprocess` — pages grouped by the *kind* of doubt
+  (`thin_for_this_document`, `table_mostly_dropped`, `table_grid_disputed`,
+  `almost_no_text`, …) and the flat list. This is the handle for a later pass:
+  when a new model or docling release fixes one of these, the affected pages
+  can be selected across the corpus and re-run without re-converting everything
 
 **An empty warning list means nothing was reported, not that nothing was lost.**
 The worst failure found so far — 315 pages of mojibake — was completely silent.
@@ -110,21 +119,67 @@ selection:
 Coverage counts characters, so it weighs a missing "the" the same as a wrong
 digit. Numeric agreement is the more meaningful figure for this corpus.
 
-## Test document
+## Asset ownership ledger
 
-Development and measurement used a single large filing, not committed here:
+The extraction feeds a regulatory asset inventory: an append-only, bitemporal
+record of **who holds which asset, who held it before, and the document that
+proves each step**.
 
-- **C38088-2 Foothills Zone 8 West Path Delivery 2023 Cond. 15 Acid Rock
-  Drainage Mitigation Plan Reports Attach 1-2** — Foothills Pipe Lines (South
-  BC) Ltd, filed 2026-01-30
-- <https://apps.cer-rec.gc.ca/REGDOCS/File/Download/4647200>
-- 986 pages, 46.4 MB, sha256 `31a44f5b7e2435fac449842a42ec2dd56d6e98ae02dd460f506c6811b3e7e499`
+```bash
+.venv/bin/python ideas/idea1/ledger.py init
+.venv/bin/python ideas/idea1/ledger.py load 4647200
+.venv/bin/python ideas/idea1/ledger.py holdings "Foothills"
+.venv/bin/python ideas/idea1/ledger.py review    # what a human still needs to confirm
+```
+
+Nothing is ever updated or deleted — corrections supersede. Every row points at
+immutable evidence (document, page, docling element, exact quote, hashed). A
+name change is recorded separately from an ownership change, because
+TransCanada Corporation becoming TC Energy Corporation kept every asset, while
+a sale does not.
+
+Company identity is anchored to REGDOCS metadata and corporate registries, not
+to OCR'd prose — the regulator states the filing company of every document, and
+that is the one company fact that does not depend on reading a PDF correctly.
+Every spelling seen, including OCR damage, is attached to the resolved entity.
+Ambiguous matches are queued for a human rather than guessed, because a wrong
+merge moves assets between owners invisibly while a duplicate is obvious.
+
+This is built on top of the extractor and lives in
+[ideas/idea1/](ideas/idea1/), which holds everything specific to it:
+`inventory.py` (extraction), `schema.sql` (the ledger), `ledger.py` (loader and
+queries) and the design notes. Nothing in it changes `ingest.py`.
+
+See [ideas/idea1/ledger.md](ideas/idea1/ledger.md) for the schema, the
+entity-resolution rules, and the corpus strategy — including the measurement
+that only **0.26%** of extracted text contains any ownership language, which is
+why an LLM belongs on retrieved candidate passages rather than on every page.
+
+## Test corpus
+
+Sixteen CER REGDOCS filings, 9,294 pages, spanning born-digital reports,
+scanned filings, French-language documents, drawing sets and laboratory
+certificate bundles. The PDFs are not committed; every document is listed with
+its REGDOCS download link in [docs/test_corpus.md](docs/test_corpus.md).
+
+The two that shaped the pipeline:
+
+- [4647200](https://apps.cer-rec.gc.ca/REGDOCS/File/Download/4647200) — 986
+  pages; 315 of them carry a text layer of unmapped glyph codes. Everything was
+  originally tuned against this one.
+- [4710294](https://apps.cer-rec.gc.ca/REGDOCS/File/Download/4710294) — 463
+  pages, scanned, 399 with no text layer at all. It scored 13.2% under settings
+  tuned on 4647200, and is why extraction is now chosen per page by result.
 
 PDFs and extraction output are deliberately kept out of git (`source/`,
-`output*/`). Download the file above to reproduce.
+`output*/`).
 
 ## Documentation
 
+- [docs/test_corpus.md](docs/test_corpus.md) — the sixteen filings used for
+  development and measurement, with download links.
+- [ideas/idea1/](ideas/idea1/) — asset ownership ledger: schema, entity
+  resolution, extraction stage, and how to scale across the corpus.
 - [docs/lessons_learned.md](docs/lessons_learned.md) — what was changed across
   five tuning runs, why, what it measured, what was tried and rejected, and
   where a commercial extractor is still ahead. Read this before changing

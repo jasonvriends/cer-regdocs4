@@ -1,8 +1,11 @@
 # Lessons learned: getting docling to Azure-level accuracy
 
-Working notes from tuning `ingest.py` against a single 986-page CER filing
-(document 4647200, *Foothills Zone 8 West Path Delivery 2023 — Condition 15
-Acid Rock Drainage Mitigation Plan Reports*, 46.4 MB).
+Working notes from tuning `ingest.py` against CER REGDOCS filings. Runs 1-6
+used a single 986-page document,
+[4647200](https://apps.cer-rec.gc.ca/REGDOCS/File/Download/4647200)
+(*Foothills Zone 8 West Path Delivery 2023 — Condition 15 Acid Rock Drainage
+Mitigation Plan Reports*, 46.4 MB); §6 onwards covers fifteen more. All sixteen
+are listed with download links in [test_corpus.md](test_corpus.md).
 
 The goal is to replace Azure Content Understanding with a local docling
 pipeline. Azure is used here only as a yardstick during the learning phase, not
@@ -442,7 +445,8 @@ halves the runtime and costs ~0.4 points.
 
 ### 7.6 The document that failed, re-run
 
-4710294 is the scanned filing that scored 13.2% in §6, with 368 of 424 pages
+[4710294](https://apps.cer-rec.gc.ca/REGDOCS/File/Download/4710294) is the
+scanned filing that scored 13.2% in §6, with 368 of 424 pages
 below half the reference. Under per-page variant selection, with no setting
 specific to it:
 
@@ -473,9 +477,131 @@ class needs the column validator in §5.1, and ultimately sampling with human
 review. At corpus scale, assume a residual silent-error rate and design
 downstream for it.
 
-## 8. Where Azure is still better
+## 8. The pipeline knew less about itself than it was worth
 
-Measured against the run-5 output.
+Measured on 4692624, comparing what the meta flagged against what was actually
+weak:
+
+| | |
+|---|---|
+| pages below 95% of the reference | 67 |
+| **weak pages the meta flagged** | **35 of 67** |
+| weak pages it said nothing about | **32** |
+| pages it flagged that were fine | 134 |
+
+A coin flip with a lot of false alarms, on a pipeline that was extracting at
+96.9%. The extraction was better than its own account of itself.
+
+### 8.1 Why
+
+The meta recorded **events**: a warning fired, cells were dropped, a cell looked
+misread. A page that quietly under-extracts produces no event, so nothing was
+written about it. Silence was being produced by two different situations --
+"this page is fine" and "nothing was noticed" -- and they were indistinguishable.
+
+### 8.2 What replaced it
+
+Every page now gets a row, whether or not anything went wrong, carrying what
+the pipeline actually knows: characters extracted, how character-like they were,
+which variant won, and **how far the variants disagreed**.
+
+Variant spread is the useful part, and it was already being computed and thrown
+away. Several independent ways of reading a page landing in the same place is
+the closest thing to a confidence measure available without a second extractor.
+A clean page scores a spread of 0.009; a page rescued from a broken text layer
+scores 0.96.
+
+### 8.3 Disagreement is not doubt
+
+The first version treated variant disagreement as a problem and flagged every
+rescued page -- on a scanned filing, nearly all of them. But a page whose
+variants disagreed enormously and which then came out clean is a success, not a
+concern.
+
+So doubt is judged on the result, and thinness is judged **against the
+document's own median yield** rather than a constant. A filing of dense tables
+and one of sparse cover letters have nothing in common in absolute terms. Pages
+under 30% of their document's median are worth revisiting even when nothing
+visibly failed.
+
+### 8.4 The re-run handle
+
+Doubts are named rather than scored: `almost_no_text`, `not_character_like`,
+`table_mostly_dropped`, `table_grid_disputed`, `thin_for_this_document`,
+`ocr_empty`, `bbox_clamped`, `needed_retry`. The meta carries a `doubts` index
+grouping pages by kind, and a flat `reprocess` list.
+
+That is the handle a later pass needs. When a new docling release fixes table
+grids, or a better OCR model appears, the pages affected by that specific
+problem can be selected across the corpus and re-run -- without re-converting
+everything, and without anyone having to remember what was wrong.
+
+## 9. Azure against docling: what each is good at
+
+Neither is uniformly better. The differences are systematic, and knowing which
+is which decides what is worth fixing.
+
+### 9.1 What Azure does better
+
+**It never trusts the text layer.** Every page is OCR'd unconditionally, which
+makes it immune to the entire class of failure in §2.1 and §6.1 -- mojibake and
+empty text layers -- without needing to detect anything. This pipeline had to
+reach the same immunity the long way round, by converting each page several ways
+and judging the result.
+
+**It reads inside drawings.** The largest remaining gap. A GIS location plan
+carries labels and UTM grid coordinates printed over the imagery, some rotated
+90 degrees up the margins; docling classifies the map as one picture and never
+looks inside. On 4692624, ten of the eleven worst pages are drawings.
+
+**It finds more tables.** 105 against 20 on 4692624. Some of that is convention
+-- Azure splits a page header block and a main table where docling emits one --
+but not all of it.
+
+**It decodes barcodes** (`PDF417 -> CCG2414506`), **detects more checkboxes**
+(341 vs 32 on 4647200), and reports **per-word confidence** and **page skew**,
+none of which docling provides.
+
+### 9.2 What docling does better
+
+**It keeps exact text where the text layer is sound.** Azure OCRs regardless,
+so it re-reads text it could have copied; docling passes the page through
+untouched. On clean pages this pipeline scores 100.0% of Azure, and some of
+Azure's "extra" content is its own OCR error -- on two weak pages of 4692624 the
+tokens docling "missed" include `aposssusus`, `comonseu`, `nofdyesty` and
+`rimgbohal`. Coverage against Azure is not coverage against truth.
+
+**It says when it has failed.** TableFormer reports how many cells it discarded,
+which is how the 99.3% collapse on page 376 was found. Azure reported zero
+warnings on the entire 986-page filing -- including for content it got wrong.
+For a regulatory corpus, an extractor that admits failure is worth a great deal.
+
+**It is local, free, and inspectable.** Its failure modes can be traced to a
+line of code, which is how every fix in this document was found.
+
+**Its output is richer structurally**: footnotes, captions, list items, formulas
+and code as distinct labels, and table cells carrying row and column spans and
+header flags.
+
+### 9.3 Azure's own defects, worth knowing
+
+**Escaped markdown.** Its markdown HTML-escapes `<`, so a cell whose `content`
+is `<0.010` appears as `&lt;0.010` and the span offsets count the escaped form.
+On some filings a majority of paragraph spans do not match their own content.
+Anything consuming Azure markdown by offset must unescape first, or it will
+mangle every detection limit in the corpus.
+
+**Parts are not concatenable as delivered.** Each analyzer result restarts span
+offsets at 0 and indexes elements (`/paragraphs/49`) into its own arrays.
+Merging requires rebasing both. Page numbers and `source` polygons are already
+global.
+
+**It cannot be interrogated.** When it is wrong there is no warning, no
+confidence on the structure, and no way to find out why.
+
+### 9.4 Raw comparison
+
+Measured against the run-5 output of 4647200.
 
 | | Azure | docling (run 5) |
 |---|---|---|
@@ -511,7 +637,7 @@ are already global.
 
 ---
 
-## 9. Where the numbers actually stand
+## 10. Where the numbers actually stand
 
 Character coverage overstates the problem: it counts a missing `the` the same as
 a wrong digit. On the substance:
@@ -528,7 +654,7 @@ files under `texts` rather than table cells — placement, not loss.
 
 ---
 
-## 10. Known intermittent failure
+## 11. Known intermittent failure
 
 One run died at page 28 with `'builtin_function_or_method' object is not
 subscriptable`, raised inside `DocumentConverter.convert`. The same page
@@ -541,7 +667,7 @@ page that needed it in `retried_pages`. A 986-page run should not end because
 one page failed once — but a pipeline that fails intermittently is worth
 watching, so the retries are recorded rather than swallowed.
 
-## 11. Open items
+## 12. Open items
 
 - **Figure text pass — implemented but disabled (`FIGURE_PASS = False`).** It
   works: 44 words recovered from the page 453 map. But the run then hung after

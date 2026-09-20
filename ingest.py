@@ -349,6 +349,7 @@ def suspect_cells(doc) -> list[dict]:
         pages = [pr.page_no for pr in table.prov]
         page = pages[0] if pages else None
         cols: dict = {}
+        boxes: dict = {}
         for c in table.data.table_cells:
             if c.column_header or c.row_header:
                 continue
@@ -356,6 +357,13 @@ def suspect_cells(doc) -> list[dict]:
             if text:
                 cols.setdefault(c.start_col_offset_idx, []).append(
                     (c.start_row_offset_idx, text))
+                # Keep the cell's box: a later pass re-reads the crop directly,
+                # and that is the one remedy already shown to fix this class --
+                # the cell that came out as "<31T" reads correctly in isolation.
+                if c.bbox is not None:
+                    boxes[(c.start_col_offset_idx, c.start_row_offset_idx)] = [
+                        round(c.bbox.l, 1), round(c.bbox.t, 1),
+                        round(c.bbox.r, 1), round(c.bbox.b, 1)]
         for col, cells in cols.items():
             values = sorted({t for _, t in cells})
             for i, a in enumerate(values):
@@ -364,9 +372,10 @@ def suspect_cells(doc) -> list[dict]:
                     if not pair:
                         continue
                     suspect, sibling = pair
+                    rows = [r for r, t in cells if t == suspect]
                     out.append({
-                        "page": page, "column": col,
-                        "rows": [r for r, t in cells if t == suspect],
+                        "page": page, "column": col, "rows": rows,
+                        "bboxes": [boxes[(col, r)] for r in rows if (col, r) in boxes],
                         "value": suspect, "sibling": sibling,
                         "rule": "letter_digit_confusion",
                     })
@@ -375,8 +384,10 @@ def suspect_cells(doc) -> list[dict]:
             if len(cells) >= 10:
                 odd = [(r, t) for r, t in cells if not NUMERIC_CELL.match(t)]
                 if len(odd) == 1:
+                    key = (col, odd[0][0])
                     out.append({"page": page, "column": col,
                                 "rows": [odd[0][0]], "value": odd[0][1],
+                                "bboxes": [boxes[key]] if key in boxes else [],
                                 "rule": "non_numeric_in_numeric_column"})
     out.sort(key=lambda f: (f["page"] is None, f["page"], f["column"]))
     return out
@@ -540,6 +551,94 @@ def convert_staged(pdf: Path, start: int, end: int, raster: bool,
         log(f"{label}: {retries} -- retrying")
         gc.collect()
     raise RuntimeError(f"{label}: conversion did not succeed")
+
+
+AGREEMENT_SPREAD = 0.05   # variants within this of each other agree
+LOW_YIELD_FRACTION = 0.3  # a page under this share of the document's median
+                          # yield is thin enough to be worth revisiting
+
+
+def page_report(report: dict) -> dict:
+    """One row per page, for every page, whether or not anything went wrong.
+
+    The meta used to record events -- a warning fired, cells were dropped --
+    which says nothing about a page that quietly under-extracts. Measured
+    against an independent extraction on one filing, event records caught 35
+    of 67 weak pages and raised 134 false alarms. A page that produced no
+    event is not a page that came out well; it is a page nothing was said
+    about.
+
+    So every page gets a row carrying what the pipeline actually knows: how
+    much it extracted, how character-like it was, and how far the variants
+    disagreed. Variant spread is the closest thing to a confidence measure
+    available without a second extractor: when several ways of reading a page
+    land in the same place, the page is probably read; when they scatter,
+    something about it is ambiguous.
+    """
+    scores = {k: v.get("score", 0.0) for k, v in (report.get("staging_scores") or {}).items()}
+    ordered = sorted(scores.values(), reverse=True)
+    top = ordered[0] if ordered else 0.0
+    low = ordered[-1] if ordered else 0.0
+    spread = round((top - low) / top, 4) if top > 0 else 0.0
+    # How far the winner beat the next best. Without this, "this variant won
+    # 65 pages" cannot be told apart from "it won 65 coin flips", and there is
+    # no basis for dropping a variant to halve the run.
+    runner_up = ordered[1] if len(ordered) > 1 else None
+    margin = round((top - runner_up) / top, 4) if runner_up is not None and top > 0 else None
+    q = report.get("quality") or {}
+    row = {
+        "page": report["page_start"],
+        "staging": report.get("staging"),
+        "chars": q.get("chars"),
+        "alnum_ratio": q.get("alnum_ratio"),
+        "variant_spread": spread,
+        "win_margin": margin,
+        "variant_scores": {k: round(v, 1) for k, v in scores.items()},
+        "variants_agree": spread <= AGREEMENT_SPREAD,
+        "doubts": doubts_for(report, q, spread),
+    }
+    if report.get("table_mode") and report["table_mode"] != TABLE_MODE:
+        row["table_mode"] = report["table_mode"]
+    return row
+
+
+def doubts_for(report: dict, quality: dict, spread: float) -> list[str]:
+    """Named, machine-readable reasons a page may not be fully extracted.
+
+    These are the handles a later re-run needs: not "something was odd" but
+    which kind of odd, so a future pass can select the pages a new model or a
+    new docling release might actually improve.
+    """
+    out = []
+    if (quality.get("chars") or 0) < MIN_PAGE_CHARS:
+        out.append("almost_no_text")
+    if (quality.get("alnum_ratio") or 1.0) < MIN_ALNUM_RATIO:
+        out.append("not_character_like")
+    # Variant disagreement alone is not a doubt. A page rescued from a broken
+    # text layer disagrees enormously and is then fine; flagging those would
+    # fill the queue with pages that came out well. The spread is kept on the
+    # row, and whether a page is actually thin is judged at merge, against the
+    # document's own median.
+    for w in report.get("warnings", []) + report.get("errors", []):
+        kind = w.get("kind")
+        if kind == "table_cells_dropped" and (w.get("drop_ratio") or 0) > 0.5:
+            out.append("table_mostly_dropped")
+        elif kind in ("ocr_empty", "bbox_clamped", "timeout"):
+            out.append(kind)
+    alt = report.get("table_mode_alternate") or {}
+    if alt.get("shapes_agree") is False:
+        out.append("table_grid_disputed")
+    if report.get("retried"):
+        out.append("needed_retry")
+    return sorted(set(out))
+
+
+def _median(values: list) -> float:
+    vals = sorted(v for v in values if v is not None)
+    if not vals:
+        return 0.0
+    mid = len(vals) // 2
+    return float(vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2)
 
 
 def dropped_cells(records: list[dict]) -> int:
@@ -1041,6 +1140,7 @@ def main() -> None:
     conf_totals, low_confidence, table_mode_overrides = {}, [], []
     structure_disagreements, figure_pages, retried_pages = [], [], []
     restaged_pages, near_empty_pages, variant_wins = [], [], {}
+    pages_report = []
     for start, end in ranges:
         warn_file = chunks / f"pg-{start:04d}-{end:04d}.warnings.json"
         if not warn_file.exists():
@@ -1055,6 +1155,7 @@ def main() -> None:
         # A page converted with the non-default table mode leaves no warning
         # once the better result is kept, so record the swap here or the meta
         # would not show that the page was handled differently.
+        pages_report.append(page_report(report))
         won = report.get("staging")
         if won:
             variant_wins[won] = variant_wins.get(won, 0) + 1
@@ -1133,6 +1234,20 @@ def main() -> None:
     for f in chunks.iterdir():
         f.unlink()
     chunks.rmdir()
+    # A page is thin relative to this document, not to a constant: a filing of
+    # dense tables and one of sparse cover letters have nothing in common in
+    # absolute terms. Pages well under the document's own median yield are
+    # worth revisiting even when nothing went visibly wrong.
+    median_chars = _median([r["chars"] or 0 for r in pages_report])
+    for row in pages_report:
+        if median_chars and (row["chars"] or 0) < median_chars * LOW_YIELD_FRACTION:
+            row["doubts"] = sorted(set(row["doubts"] + ["thin_for_this_document"]))
+    doubt_index: dict = {}
+    for row in pages_report:
+        for d in row["doubts"]:
+            doubt_index.setdefault(d, []).append(row["page"])
+    reprocess = {pg for pages in doubt_index.values() for pg in pages}
+
     write_atomic(out / f"{doc_id}.docling.meta.json", json.dumps({
         "doc_id": doc_id,
         "source": source,
@@ -1153,6 +1268,23 @@ def main() -> None:
         "confidence_mean": {k: round(sum(v) / len(v), 4)
                             for k, v in sorted(conf_totals.items()) if v},
         "low_confidence_pages": low_confidence,
+        # One row per page: what was extracted, how character-like it was, and
+        # how far the variants disagreed. Present for every page, so a weak
+        # page can be found without a reference extraction to compare against.
+        "pages": pages_report,
+        # Pages grouped by the kind of doubt, and the same list flattened.
+        # This is the handle for a later pass: a new docling release or OCR
+        # model can be pointed at exactly the pages a given problem affects,
+        # instead of re-converting the corpus.
+        "doubts": doubt_index,
+        "reprocess": sorted(reprocess),
+        "reprocess_pages": len(reprocess),
+        "quality": {
+            "pages": len(pages_report),
+            "variants_agree": sum(1 for r in pages_report if r["variants_agree"]),
+            "median_chars": _median([r["chars"] or 0 for r in pages_report]),
+            "median_alnum_ratio": _median([r["alnum_ratio"] or 0 for r in pages_report]),
+        },
         # Cells that look misread judged against their own column. Not errors
         # by themselves: a review list, shortest-odds first.
         "suspect_cell_counts": suspect_counts,
