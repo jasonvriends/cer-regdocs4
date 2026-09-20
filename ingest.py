@@ -872,6 +872,23 @@ def pdf_provenance(pdf: Path) -> dict:
     except Exception as exc:
         info["pdf"] = {"error": str(exc)}
 
+    # A sidecar beside the PDF, written by whatever fetched it. File-local, so
+    # it travels with the document; absent for a PDF handed over on its own.
+    sidecar = pdf.with_suffix(".metadata.json")
+    if sidecar.exists():
+        try:
+            ext = json.loads(sidecar.read_text())
+            filing = {k: ext.get(k) for k in
+                      ("document_id", "title", "company", "submitter", "project",
+                       "filing_number", "filing_date", "source_url", "sha256")
+                      if ext.get(k) is not None}
+            if filing:
+                info["filing"] = filing
+                known = filing.get("sha256")
+                if known:
+                    info["sha256_matches_sidecar"] = (known == info["sha256"])
+        except Exception as exc:
+            info["filing"] = {"error": f"unreadable sidecar: {exc}"}
     return info
 
 
@@ -887,11 +904,12 @@ def verify_regdocs_url(doc_id: str, given: str | None) -> dict:
     filename; an unknown id lands on an HTML page instead. Network trouble
     leaves the link recorded as underived rather than failing the ingest.
     """
-    if given and given.lower().startswith(("http://", "https://")):
-        return {"source_url": given, "source_url_from": "argument"}
-    if not doc_id.isdigit() or os.environ.get("NO_URL_CHECK"):
+    from_arg = bool(given and given.lower().startswith(("http://", "https://")))
+    if not from_arg and (not doc_id.isdigit() or os.environ.get("NO_URL_CHECK")):
         return {}
-    url = REGDOCS_URL.format(doc_id)
+    url = given if from_arg else REGDOCS_URL.format(doc_id)
+    if os.environ.get("NO_URL_CHECK"):
+        return {"source_url": url, "source_url_from": "argument"}
     try:
         out = subprocess.run(
             ["curl", "-sL", "-o", "/dev/null", "-r", "0-999", "--max-time", "45",
@@ -901,13 +919,14 @@ def verify_regdocs_url(doc_id: str, given: str | None) -> dict:
         code, ctype, effective = (out.stdout.split("|", 2) + ["", "", ""])[:3]
         resolved = code in ("200", "206") and "text/html" not in ctype
         info = {"source_url": url,
-                "source_url_from": "filename pattern",
+                "source_url_from": "argument" if from_arg else "filename pattern",
                 "source_url_verified": resolved}
         if resolved and effective:
             info["source_url_resolved_to"] = effective.strip()
         return info
     except Exception as exc:
-        return {"source_url": url, "source_url_from": "filename pattern",
+        return {"source_url": url,
+                "source_url_from": "argument" if from_arg else "filename pattern",
                 "source_url_verified": None,
                 "source_url_check_error": str(exc)}
 
