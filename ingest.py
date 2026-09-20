@@ -50,6 +50,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -828,6 +829,89 @@ def renumber_pages(doc, offset: int) -> None:
         pg.page_no = n
 
 
+REGDOCS_URL = "https://apps.cer-rec.gc.ca/REGDOCS/File/Download/{}"
+
+
+def file_digest(path: Path) -> str:
+    """sha256 of the source PDF, so a run can be tied to exact bytes.
+
+    Size alone cannot tell a re-issued filing from the one that was read.
+    """
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def pdf_provenance(pdf: Path) -> dict:
+    """Where the file came from and what produced it.
+
+    The producer matters more than it looks: the failures in this corpus are
+    not spread evenly across tools. Recording it per document makes the
+    question answerable across a whole corpus -- which producers make files
+    whose text layer cannot be trusted -- instead of one filing at a time.
+
+    """
+    import pypdfium2 as pdfium
+
+    info: dict = {"sha256": file_digest(pdf), "bytes": pdf.stat().st_size}
+    try:
+        doc = pdfium.PdfDocument(str(pdf))
+        meta = doc.get_metadata_dict() or {}
+        info["pdf"] = {
+            "version": doc.get_version(),
+            "producer": meta.get("Producer") or None,
+            "creator": meta.get("Creator") or None,
+            "author": meta.get("Author") or None,
+            "title": meta.get("Title") or None,
+            "created": meta.get("CreationDate") or None,
+            "modified": meta.get("ModDate") or None,
+        }
+        doc.close()
+    except Exception as exc:
+        info["pdf"] = {"error": str(exc)}
+
+    return info
+
+
+def verify_regdocs_url(doc_id: str, given: str | None) -> dict:
+    """Where this file can be fetched again.
+
+    If the ingest was handed a URL, that is the answer. Otherwise the REGDOCS
+    download link is derived from the filename and then checked, because a
+    derived link that has never been tried is a guess written down as a fact.
+
+    The check is a one-kilobyte ranged request following redirects. A real
+    document ends at a PDF byte range whose redirect carries the filing's
+    filename; an unknown id lands on an HTML page instead. Network trouble
+    leaves the link recorded as underived rather than failing the ingest.
+    """
+    if given and given.lower().startswith(("http://", "https://")):
+        return {"source_url": given, "source_url_from": "argument"}
+    if not doc_id.isdigit() or os.environ.get("NO_URL_CHECK"):
+        return {}
+    url = REGDOCS_URL.format(doc_id)
+    try:
+        out = subprocess.run(
+            ["curl", "-sL", "-o", "/dev/null", "-r", "0-999", "--max-time", "45",
+             # content_type contains spaces, so the fields need a delimiter
+             "-w", "%{http_code}|%{content_type}|%{url_effective}", url],
+            capture_output=True, text=True, timeout=60)
+        code, ctype, effective = (out.stdout.split("|", 2) + ["", "", ""])[:3]
+        resolved = code in ("200", "206") and "text/html" not in ctype
+        info = {"source_url": url,
+                "source_url_from": "filename pattern",
+                "source_url_verified": resolved}
+        if resolved and effective:
+            info["source_url_resolved_to"] = effective.strip()
+        return info
+    except Exception as exc:
+        return {"source_url": url, "source_url_from": "filename pattern",
+                "source_url_verified": None,
+                "source_url_check_error": str(exc)}
+
+
 def ingest_fingerprint() -> dict:
     """Identify the script that produced a run.
 
@@ -953,6 +1037,8 @@ def main() -> None:
                 f"settings; they will be reconverted")
     write_atomic(stamp, json.dumps(signature, indent=2) + "\n")
 
+    provenance = pdf_provenance(pdf)
+    provenance.update(verify_regdocs_url(doc_id, source))
     bad_pages = unmapped_pages(pdf, total)
     outline = read_outline(pdf)
     log(f"{doc_id}: {len(bad_pages)} of {total} pages have an unusable text layer "
@@ -1252,6 +1338,7 @@ def main() -> None:
         "doc_id": doc_id,
         "source": source,
         "pdf_bytes": pdf.stat().st_size,
+        "provenance": provenance,
         "page_count": total,
         "chunk_pages": CHUNK_PAGES,
         "docling_version": docling.__version__,
