@@ -676,6 +676,7 @@ def _median(values: list) -> float:
 
 
 MAX_INDEX_ENTRIES = 5000   # keeps the index a summary, not a second document
+MAX_DATASETS = 200         # distinct table shapes worth listing
 INDEX_SCHEMA = 1
 
 
@@ -742,6 +743,42 @@ def content_index(doc, doc_id: str, signature: dict, pages: int) -> dict:
             "caption": caption_of(t),
         })
 
+    # What could be mined from this document, as opposed to what is in it.
+    # One dataset is routinely spread over dozens of tables: conversion is per
+    # page, and the same table continued across pages arrives once per page.
+    # Grouping by the set of column names collapses that back into the thing a
+    # reader cares about -- "a 1,200-row analyte result table over pages
+    # 257-970" rather than 37 separate tables. Column order is ignored, since
+    # the same table can be read with its columns in a different order.
+    groups: dict = {}
+    for t in tables:
+        if not t["columns"]:
+            continue
+        key = tuple(sorted(c.lower() for c in t["columns"] if c))
+        g = groups.setdefault(key, {"columns": t["columns"], "tables": 0,
+                                    "rows": 0, "numeric_cells": 0, "cells": 0,
+                                    "pages": [], "captions": set()})
+        g["tables"] += 1
+        g["rows"] += t["rows"] or 0
+        g["numeric_cells"] += t["numeric_cells"]
+        g["cells"] += t["cells"]
+        if t["page"] is not None:
+            g["pages"].append(t["page"])
+        if t["caption"]:
+            g["captions"].add(t["caption"])
+    datasets = []
+    for g in groups.values():
+        pages = sorted(g["pages"])
+        datasets.append({
+            "columns": g["columns"],
+            "tables": g["tables"], "rows": g["rows"],
+            "first_page": pages[0] if pages else None,
+            "last_page": pages[-1] if pages else None,
+            "numeric_share": round(g["numeric_cells"] / g["cells"], 3) if g["cells"] else 0.0,
+            "captions": sorted(g["captions"])[:3],
+        })
+    datasets.sort(key=lambda d: -d["rows"])
+
     pictures = []
     for pic in doc.pictures:
         prov = [pr.page_no for pr in pic.prov]
@@ -758,6 +795,10 @@ def content_index(doc, doc_id: str, signature: dict, pages: int) -> dict:
                    "pictures": len(doc.pictures)},
         "headings": headings[:MAX_INDEX_ENTRIES],
         "headings_truncated": max(0, len(headings) - MAX_INDEX_ENTRIES),
+        # The survey view: distinct tables grouped by their columns, biggest
+        # first. This is what says whether a document is worth mining.
+        "datasets": datasets[:MAX_DATASETS],
+        "datasets_truncated": max(0, len(datasets) - MAX_DATASETS),
         "tables": tables[:MAX_INDEX_ENTRIES],
         "tables_truncated": max(0, len(tables) - MAX_INDEX_ENTRIES),
         "pictures": pictures[:MAX_INDEX_ENTRIES],

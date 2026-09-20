@@ -101,9 +101,20 @@ numeric, an address block runs 0%. So a table with a `Detection Limit` column is
 findable across a corpus without opening a single 250 MB document.
 
 Conversion runs one page at a time, so **a table continued across pages arrives
-as one table per page**. A consumer stitching a dataset back together matches
-identical columns on consecutive pages; the index flags this with
-`tables_are_per_page` rather than pretending otherwise.
+as one table per page** (flagged as `tables_are_per_page`). The index therefore
+also carries a `datasets` roll-up — tables grouped by their set of column names,
+biggest first — which is the view that answers whether a document is worth
+mining at all:
+
+```json
+{"columns": ["Result", "Analyte", "CAS Number Method", "LOR", "Unit", "Qualifier"],
+ "tables": 37, "rows": 1217, "first_page": 257, "last_page": 970,
+ "numeric_share": 0.27}
+```
+
+One filing's 887 tables reduce to that plus a long tail. Column order is ignored
+when grouping, since the same table can be read with its columns in a different
+order and would otherwise appear as two datasets.
 
 It carries the `run_signature` it was built from. An index derived later, from
 whatever document happens to be on disk, can silently describe a different
