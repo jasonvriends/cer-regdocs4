@@ -40,9 +40,12 @@ An empty warning list means docling reported nothing, not that nothing was
 lost. The mojibake above was silent: 315 pages of it, found only by comparing
 against a second extraction of the same filing.
 
+The script that produced a run is copied to runs/<run id>.py and referenced
+from the meta, so the code behind an output is recoverable even when the run
+was made from an edited working copy.
+
 Writes to output/<id>/:
     runs.json                     one line per run: settings in, results out
-    <run>/ingest.py               the script that produced it, verbatim
     <run>/<id>.docling.json.gz    the document: structure, tables, provenance
     <run>/<id>.docling.meta.json  provenance, settings, per-page quality, doubts
 
@@ -1040,6 +1043,28 @@ def page_geometry(pdf: Path, total: int) -> dict:
             "rotations": rotations}
 
 
+def keep_script(rid: str) -> str:
+    """Store the script that produced a run, under runs/<run id>.py.
+
+    The signature records which code ran; this records what that code was, and
+    a hash only resolves to something while the file still exists. Runs made
+    from an edited working copy -- the usual case while settings are being
+    tuned -- cannot be recovered from the repository afterwards.
+
+    One file per run configuration, not one per document: a batch gives every
+    document the same run id and therefore the same script, so a copy beside
+    each document would be thousands of identical files.
+    """
+    store = Path("runs")
+    store.mkdir(parents=True, exist_ok=True)
+    dest = store / f"{rid}.py"
+    if not dest.exists():
+        tmp = dest.with_suffix(".py.part")
+        shutil.copy2(Path(__file__).resolve(), tmp)
+        tmp.replace(dest)
+    return str(dest)
+
+
 def git_provenance() -> dict:
     """The commit this ran from, and whether the tree was clean.
 
@@ -1199,12 +1224,7 @@ def main() -> None:
         rebuild_runs(doc_root, doc_id)
         return
     log(f"{doc_id}: run {rid}")
-    # The script itself, beside its output. The signature records which code
-    # ran; this records what that code was. A run made from an edited working
-    # copy -- the normal case while settings are being tuned -- cannot be
-    # recovered from the repository afterwards, and the file is a few tens of
-    # kilobytes against a document of tens of megabytes.
-    shutil.copy2(Path(__file__).resolve(), out / "ingest.py")
+    script_copy = keep_script(rid)
     total = len(pdfium.PdfDocument(str(pdf)))
 
     device = pick_device()
@@ -1555,7 +1575,7 @@ def main() -> None:
         "chunk_pages": CHUNK_PAGES,
         "docling_version": docling.__version__,
         "ingest": {**ingest_fingerprint(), "git": git_provenance(),
-                   "copy": "ingest.py"},
+                   "copy": script_copy},
         "host": host_environment(device),
         "argv": sys.argv[1:],
         "geometry": geometry,
