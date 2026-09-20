@@ -709,13 +709,25 @@ def content_index(doc, doc_id: str, signature: dict, pages: int) -> dict:
                          "level": getattr(item, "level", None),
                          "text": (item.text or "")[:200]})
 
+    def caption_of(item) -> str | None:
+        texts = []
+        for ref in getattr(item, "captions", None) or []:
+            try:
+                texts.append((ref.resolve(doc).text or "").strip())
+            except Exception:
+                continue
+        joined = " ".join(t for t in texts if t)
+        return joined[:200] or None
+
     tables = []
     for t in doc.tables:
         prov = [pr.page_no for pr in t.prov]
         cells = t.data.table_cells
         body = [(c.text or "").strip() for c in cells if not c.column_header]
         numeric = sum(1 for v in body if NUMERIC_CELL.match(v))
-        header = " | ".join((c.text or "").strip() for c in cells if c.column_header)
+        # Columns as a list rather than one joined string: a consumer matching
+        # "Detection Limit" should not have to split prose back apart.
+        columns = [(c.text or "").strip()[:80] for c in cells if c.column_header]
         tables.append({
             "page": prov[0] if prov else None,
             "rows": t.data.num_rows, "cols": t.data.num_cols,
@@ -724,10 +736,17 @@ def content_index(doc, doc_id: str, signature: dict, pages: int) -> dict:
             # a table used for layout: water-quality results here run 66-72%,
             # an address block runs 0%.
             "numeric_cells": numeric,
-            "header": header[:200],
+            "columns": columns[:60],
+            # A caption names the dataset better than its columns do --
+            # "Table 3-1 Water Quality Results" against "Station ID | Date".
+            "caption": caption_of(t),
         })
 
-    picture_pages = sorted({pr.page_no for pic in doc.pictures for pr in pic.prov})
+    pictures = []
+    for pic in doc.pictures:
+        prov = [pr.page_no for pr in pic.prov]
+        pictures.append({"page": prov[0] if prov else None,
+                         "caption": caption_of(pic)})
     return {
         "index_schema": INDEX_SCHEMA,
         "doc_id": doc_id,
@@ -741,7 +760,13 @@ def content_index(doc, doc_id: str, signature: dict, pages: int) -> dict:
         "headings_truncated": max(0, len(headings) - MAX_INDEX_ENTRIES),
         "tables": tables[:MAX_INDEX_ENTRIES],
         "tables_truncated": max(0, len(tables) - MAX_INDEX_ENTRIES),
-        "picture_pages": picture_pages[:MAX_INDEX_ENTRIES],
+        "pictures": pictures[:MAX_INDEX_ENTRIES],
+        "pictures_truncated": max(0, len(pictures) - MAX_INDEX_ENTRIES),
+        # Conversion runs one page at a time, so a table continued across pages
+        # arrives as one table per page rather than one table. A consumer
+        # stitching a dataset back together matches identical columns on
+        # consecutive pages; nothing here does that for it.
+        "tables_are_per_page": True,
     }
 
 

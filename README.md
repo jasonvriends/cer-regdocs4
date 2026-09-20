@@ -93,12 +93,17 @@ trades accuracy for speed; the list is the knob.
 
 ### The index
 
-`<id>.docling.index.json` lists the document's headings and one row per table —
-page, dimensions, the header row, and how many body cells are numbers. That last
-figure separates a dataset from a table used for layout: water-quality results
-in this corpus run 66–72% numeric, an address block runs 0%. So
-`"Parameter | Result | Detection Limit"` is findable across a corpus without
-opening a single 250 MB document.
+`<id>.docling.index.json` lists the document's headings, one row per table —
+page, dimensions, column names, caption, and how many body cells are numbers —
+and one row per picture with its caption. The numeric count separates a dataset
+from a table used for layout: water-quality results in this corpus run 66–72%
+numeric, an address block runs 0%. So a table with a `Detection Limit` column is
+findable across a corpus without opening a single 250 MB document.
+
+Conversion runs one page at a time, so **a table continued across pages arrives
+as one table per page**. A consumer stitching a dataset back together matches
+identical columns on consecutive pages; the index flags this with
+`tables_are_per_page` rather than pretending otherwise.
 
 It carries the `run_signature` it was built from. An index derived later, from
 whatever document happens to be on disk, can silently describe a different
