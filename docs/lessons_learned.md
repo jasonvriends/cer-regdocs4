@@ -196,7 +196,26 @@ available, but it defeats the purpose: the goal is to stop paying for Azure.
 Kept as a learning-phase tool only. Everything shipped in the pipeline judges
 the output on its own terms.
 
-### 3.5 180° rotation in the figure pass
+### 3.5 OCR language settings, for a corpus that is not all English
+
+Two filings here are French -- a *Rapport* and a *Cahier des pièces du
+demandeur* -- and the pipeline OCRs with `lang=["en"]`. That looked like a
+plain bug worth fixing before a corpus run.
+
+It is not. On the scanned French filing, `en`, `fr` and `la` score
+**identically, 96.9%** over the sampled pages. The PP-OCRv6 detection and
+recognition models this pipeline selects are the multi-language family, and
+the language tag does not change which weights are loaded or what they emit.
+
+The line is kept rather than deleted, because `RapidOcrOptions` defaults to
+Chinese. Removing it would not leave "no language"; it would leave `ch`, and a
+later change of model family would inherit that silently. It is commented in
+`build_converter` as inert-but-deliberate.
+
+Worth re-testing if the model family ever changes, or if a filing appears in a
+script the Latin models do not cover.
+
+### 3.6 180° rotation in the figure pass
 
 Worth +0.4 to +1.7 points against +2 to +4 for 90°/270°. Dropped.
 
@@ -667,7 +686,62 @@ page that needed it in `retried_pages`. A 986-page run should not end because
 one page failed once — but a pipeline that fails intermittently is worth
 watching, so the retries are recorded rather than swallowed.
 
-## 12. Open items
+## 12. What the meta deliberately does not record
+
+The meta records what the pipeline did and what it found. It does not say what
+a document *is* -- that it is a post-construction monitoring report, a
+compliance filing, an order.
+
+That is a separate job, and keeping it separate has a practical reason.
+Classification rules change: a category gets split, a new one appears, a rule
+turns out to be wrong. If those judgements were written during extraction,
+changing one would mean re-extracting the corpus -- seven hours for sixteen
+filings, and the whole thing is meant to scale past a hundred thousand. A
+classifier that reads the metas can be re-run over the corpus in minutes and
+corrected as often as it needs to be.
+
+Extraction also cannot check its own classification. A misread table announces
+itself through dropped cells; a document filed under the wrong category looks
+exactly like one filed correctly.
+
+The material a classifier needs is already there, which is the point of
+recording it:
+
+- `provenance.filing` -- title, company, submitter, project, filing number and
+  date, from the filing's own record
+- `contents.headings` -- the document's structure as extracted
+- `contents.table_index` -- every table's header row, so "Parameter | Result |
+  Detection Limit" is findable without opening the document
+- `contents.labels` -- how much of the document is prose, tables, forms or
+  drawings
+
+So the answer to "should the meta know about monitoring reports and orders" is
+no, and it is not a question of size: the meta should carry the evidence and
+leave the verdict to something that can be re-run without re-reading 46 MB of
+PDF.
+
+### 12.1 One thing a downstream consumer needs from here
+
+Anything built on these extractions and anchored to them -- a ledger that cites
+document, page and exact quote, for instance -- is pinned to a particular
+extraction. This pipeline has been re-run seven times while being tuned, and
+several of those runs changed the text on some pages: a page of mojibake became
+a page of readable text. A quote hash taken from one run will not match the
+next, and "the evidence changed" and "the extraction improved" are the same
+event seen from two sides.
+
+So a consumer should record, next to each claim, the `run_signature` of the
+extraction it was drawn from. Then a broken hash is answerable: the same
+`ingest_sha256` means the evidence really did change and something is wrong,
+a different one means the page was re-extracted and the claim needs re-reading
+rather than investigating.
+
+The `doubts` list matters for the same reason. A claim drawn from a page tagged
+`thin_for_this_document` or `table_grid_disputed` rests on weaker ground than
+one from a page where every variant agreed, and the meta already says which is
+which.
+
+## 13. Open items
 
 - **Figure text pass — implemented but disabled (`FIGURE_PASS = False`).** It
   works: 44 words recovered from the page 453 map. But the run then hung after
