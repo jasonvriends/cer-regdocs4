@@ -30,8 +30,9 @@ Output lands in `output/<id>/`:
 
 | file | contents |
 |------|----------|
-| `<id>.docling.json` | the document: structure, tables, provenance |
-| `<id>.docling.meta.json` | settings, timing, per-page warnings, self-checks |
+| `<id>.docling.json.gz` | the document: structure, tables, provenance |
+| `<id>.docling.meta.json` | provenance, settings, timing, per-page quality and doubts |
+| `<id>.docling.index.json` | headings and tables, to query a corpus without opening documents |
 
 Markdown is a lossy projection and is not written; export it from the JSON when
 needed (`doc.export_to_markdown()`).
@@ -89,6 +90,23 @@ trades accuracy for speed; the list is the knob.
   `almost_no_text`, …) and the flat list. This is the handle for a later pass:
   when a new model or docling release fixes one of these, the affected pages
   can be selected across the corpus and re-run without re-converting everything
+
+### The index
+
+`<id>.docling.index.json` lists the document's headings and one row per table —
+page, dimensions, the header row, and how many body cells are numbers. That last
+figure separates a dataset from a table used for layout: water-quality results
+in this corpus run 66–72% numeric, an address block runs 0%. So
+`"Parameter | Result | Detection Limit"` is findable across a corpus without
+opening a single 250 MB document.
+
+It carries the `run_signature` it was built from. An index derived later, from
+whatever document happens to be on disk, can silently describe a different
+extraction — these outputs changed between runs while the pipeline was tuned.
+
+What a document *is* — a monitoring report, an order — is deliberately absent.
+Those rules change, and a judgement written at extraction time can only be
+corrected by extracting again.
 
 **An empty warning list means nothing was reported, not that nothing was lost.**
 The worst failure found so far — 315 pages of mojibake — was completely silent.

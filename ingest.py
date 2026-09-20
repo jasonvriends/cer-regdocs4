@@ -37,6 +37,7 @@ against a second extraction of the same filing.
 Writes to output/<id>/:
     <id>.docling.json.gz    the document: structure, tables, provenance
     <id>.docling.meta.json  source, pages, settings, timing, per-page warnings
+    <id>.docling.index.json headings and tables, to query without the document
 
 Markdown is a lossy projection and is not written here; export it from the JSON
 when it is needed (doc.export_to_markdown()).
@@ -674,19 +675,26 @@ def _median(values: list) -> float:
     return float(vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2)
 
 
-MAX_INDEX_ENTRIES = 3000   # keeps the index a summary, not a second copy
+MAX_INDEX_ENTRIES = 5000   # keeps the index a summary, not a second document
+INDEX_SCHEMA = 1
 
 
-def content_index(doc) -> dict:
-    """What is in the document, without opening the document.
+def content_index(doc, doc_id: str, signature: dict, pages: int) -> dict:
+    """What is in the document, so a corpus can be queried without opening it.
 
-    The document JSON is gzipped and can run to hundreds of megabytes, so a
-    question asked across a corpus -- which filings contain water-quality
-    result tables, what sections does this one have -- should not require
-    reading every one of them. The headings are the filing's structure as
-    extracted; the table headers are the handle for finding structured data,
-    since a table whose columns read "Parameter | Result | Detection Limit" is
-    a dataset whatever the document is called.
+    Written beside the meta rather than inside it: the meta is the file someone
+    opens to see how a run went, this is bulk to query across a corpus, and
+    mixing them means neither can be loaded without the other.
+
+    It is a fact about one extraction, not a judgement about the filing, so it
+    carries the run signature it was built from. Derived later from whatever
+    document happens to be on disk, an index can silently describe a different
+    run -- these extractions changed between runs while the pipeline was being
+    tuned. Built here, it cannot.
+
+    What a document *is* -- a monitoring report, an order -- is deliberately
+    absent. Rules for that change, and a judgement written at extraction can
+    only be corrected by extracting again.
     """
     labels: dict = {}
     for item in doc.texts:
@@ -696,27 +704,44 @@ def content_index(doc) -> dict:
     for item in doc.texts:
         if item.label != "section_header":
             continue
-        pages = [pr.page_no for pr in item.prov]
-        headings.append({"page": pages[0] if pages else None,
+        prov = [pr.page_no for pr in item.prov]
+        headings.append({"page": prov[0] if prov else None,
                          "level": getattr(item, "level", None),
-                         "text": (item.text or "")[:160]})
+                         "text": (item.text or "")[:200]})
 
     tables = []
     for t in doc.tables:
-        pages = [pr.page_no for pr in t.prov]
+        prov = [pr.page_no for pr in t.prov]
         cells = t.data.table_cells
+        body = [(c.text or "").strip() for c in cells if not c.column_header]
+        numeric = sum(1 for v in body if NUMERIC_CELL.match(v))
         header = " | ".join((c.text or "").strip() for c in cells if c.column_header)
-        tables.append({"page": pages[0] if pages else None,
-                       "rows": t.data.num_rows, "cols": t.data.num_cols,
-                       "header": header[:160]})
+        tables.append({
+            "page": prov[0] if prov else None,
+            "rows": t.data.num_rows, "cols": t.data.num_cols,
+            "cells": len(cells),
+            # The share of body cells that are numbers separates a dataset from
+            # a table used for layout: water-quality results here run 66-72%,
+            # an address block runs 0%.
+            "numeric_cells": numeric,
+            "header": header[:200],
+        })
 
+    picture_pages = sorted({pr.page_no for pic in doc.pictures for pr in pic.prov})
     return {
+        "index_schema": INDEX_SCHEMA,
+        "doc_id": doc_id,
+        "generated_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        "run_signature": signature,
+        "page_count": pages,
         "labels": dict(sorted(labels.items(), key=lambda kv: -kv[1])),
-        "tables": len(tables), "pictures": len(doc.pictures),
+        "counts": {"headings": len(headings), "tables": len(tables),
+                   "pictures": len(doc.pictures)},
         "headings": headings[:MAX_INDEX_ENTRIES],
         "headings_truncated": max(0, len(headings) - MAX_INDEX_ENTRIES),
-        "table_index": tables[:MAX_INDEX_ENTRIES],
-        "table_index_truncated": max(0, len(tables) - MAX_INDEX_ENTRIES),
+        "tables": tables[:MAX_INDEX_ENTRIES],
+        "tables_truncated": max(0, len(tables) - MAX_INDEX_ENTRIES),
+        "picture_pages": picture_pages[:MAX_INDEX_ENTRIES],
     }
 
 
@@ -1465,7 +1490,9 @@ def main() -> None:
         if report.get("warnings") or report.get("errors") or report.get("warnings_over_cap"):
             chunk_reports.append(report)  # clean chunks are omitted; counts stay exact
 
-    contents = content_index(merged)
+    contents = content_index(merged, doc_id, signature, total)
+    write_atomic(out / f"{doc_id}.docling.index.json",
+                 json.dumps(contents, indent=2, ensure_ascii=False) + "\n")
     suspects = suspect_cells(merged)
     suspect_counts = {}
     for f in suspects:
@@ -1523,9 +1550,10 @@ def main() -> None:
         "host": host_environment(device),
         "argv": sys.argv[1:],
         "geometry": geometry,
-        # An index of the document's own contents, so a corpus-wide question
-        # does not require opening every document.
-        "contents": contents,
+        # A pointer and the headline counts; the lists live in the index file
+        # so the meta stays the thing you read rather than bulk to query.
+        "contents": {"index_file": f"{doc_id}.docling.index.json",
+                     **contents["counts"], "labels": contents["labels"]},
         "page_seconds": {
             "min": page_seconds[0] if page_seconds else None,
             "median": _median(page_seconds),
