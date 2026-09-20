@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Ingest a PDF into docling JSON, one page at a time.
 
-    ingest.py <pdf-path-or-url> [--force]
+    ingest.py <pdf-path-or-url>
 
 Output is written per run of settings, not per document. Every setting that
 changes the output goes into a run signature, and its short hash names the
 directory. The same settings land in the same place and are not redone; change
 one and the next run lands beside the old rather than over it, so the effect of
 a parameter is a diff of two directories instead of a memory of what used to be
-there. --force redoes a run that already exists.
+there.
+
+Nothing overwrites a finished run. To redo one, delete its directory.
 
 Everything is fixed: a CUDA GPU with 16 GB or more is used when present and the
 CPU (8 threads) otherwise, RapidOCR (full-page on rasterized pages, pdf-aware
@@ -40,8 +42,12 @@ against a second extraction of the same filing.
 
 Writes to output/<id>/:
     runs.json                     one line per run: settings in, results out
+    <run>/ingest.py               the script that produced it, verbatim
     <run>/<id>.docling.json.gz    the document: structure, tables, provenance
     <run>/<id>.docling.meta.json  provenance, settings, per-page quality, doubts
+
+runs.json is derived and safe to delete; the next ingest rebuilds it from the
+run directories present.
 
 The meta answers two questions and deliberately not a third: what produced this
 output, and what went well or badly in it. What the document *contains* is a
@@ -1034,6 +1040,31 @@ def page_geometry(pdf: Path, total: int) -> dict:
             "rotations": rotations}
 
 
+def git_provenance() -> dict:
+    """The commit this ran from, and whether the tree was clean.
+
+    A hash of the script says two runs differed; a commit says what the
+    difference was. "dirty" matters more than it looks -- a run from an edited
+    working copy cannot be recovered from the repository, which is the usual
+    case while something is being tuned.
+    """
+    def run(*args: str) -> str | None:
+        try:
+            out = subprocess.run(args, capture_output=True, text=True, timeout=10,
+                                 cwd=str(Path(__file__).resolve().parent))
+            return out.stdout.strip() if out.returncode == 0 else None
+        except Exception:
+            return None
+
+    commit = run("git", "rev-parse", "HEAD")
+    if not commit:
+        return {}
+    status = run("git", "status", "--porcelain")
+    return {"commit": commit,
+            "dirty": bool(status),
+            "branch": run("git", "rev-parse", "--abbrev-ref", "HEAD")}
+
+
 def ingest_fingerprint() -> dict:
     """Identify the script that produced a run.
 
@@ -1089,44 +1120,47 @@ def run_id(signature: dict) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()[:8]
 
 
-def record_run(doc_root: Path, doc_id: str, rid: str, meta: dict) -> None:
-    """Keep one line per run of this document, so runs can be compared.
+def rebuild_runs(doc_root: Path, doc_id: str) -> None:
+    """Summarise every run of this document, so settings can be compared.
 
-    Holds what each run was configured to do and what came out of it. A
-    parameter change is then answerable by reading this file rather than by
-    opening two documents and remembering which was which.
+    Derived, never accumulated: the file is rebuilt from whatever run
+    directories are present. Deleting it loses nothing -- the next ingest
+    writes it again -- and deleting a run directory removes it from here too,
+    rather than leaving an entry pointing at something that is gone.
     """
-    path = doc_root / "runs.json"
-    try:
-        book = json.loads(path.read_text()) if path.exists() else {}
-    except Exception:
-        book = {}
-    runs = book.get("runs") or {}
-    runs[rid] = {
-        "run_id": rid,
-        "ingested_at": meta.get("ingested_at"),
-        "elapsed_seconds": meta.get("elapsed_seconds"),
-        "docling_version": meta.get("docling_version"),
-        "run_signature": meta.get("run_signature"),
-        "settings": meta.get("settings"),
-        "result": {
-            "pages": meta.get("page_count"),
-            "warning_counts": meta.get("warning_counts"),
-            "cells_dropped_total": meta.get("cells_dropped_total"),
-            "severe_table_losses": len(meta.get("severe_table_losses") or []),
-            "suspect_cells": meta.get("suspect_cell_total"),
-            "reprocess_pages": meta.get("reprocess_pages"),
-            "doubts": {k: len(v) for k, v in (meta.get("doubts") or {}).items()},
-            "variant_wins": meta.get("variant_wins"),
-            "confidence_mean": meta.get("confidence_mean"),
-            "quality": meta.get("quality"),
-            "page_seconds": meta.get("page_seconds"),
-        },
-    }
-    book.update({"doc_id": doc_id, "latest": rid,
-                 "runs": dict(sorted(runs.items(),
-                                     key=lambda kv: kv[1].get("ingested_at") or ""))})
-    write_atomic(path, json.dumps(book, indent=2) + "\n")
+    runs = {}
+    for meta_path in sorted(doc_root.glob(f"*/{doc_id}.docling.meta.json")):
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception as exc:
+            runs[meta_path.parent.name] = {"error": f"unreadable meta: {exc}"}
+            continue
+        runs[meta_path.parent.name] = {
+            "run_id": meta.get("run_id"),
+            "ingested_at": meta.get("ingested_at"),
+            "elapsed_seconds": meta.get("elapsed_seconds"),
+            "docling_version": meta.get("docling_version"),
+            "run_signature": meta.get("run_signature"),
+            "settings": meta.get("settings"),
+            "result": {
+                "pages": meta.get("page_count"),
+                "warning_counts": meta.get("warning_counts"),
+                "cells_dropped_total": meta.get("cells_dropped_total"),
+                "severe_table_losses": len(meta.get("severe_table_losses") or []),
+                "suspect_cells": meta.get("suspect_cell_total"),
+                "reprocess_pages": meta.get("reprocess_pages"),
+                "doubts": {k: len(v) for k, v in (meta.get("doubts") or {}).items()},
+                "variant_wins": meta.get("variant_wins"),
+                "confidence_mean": meta.get("confidence_mean"),
+                "quality": meta.get("quality"),
+                "page_seconds": meta.get("page_seconds"),
+            },
+        }
+    ordered = dict(sorted(runs.items(), key=lambda kv: kv[1].get("ingested_at") or ""))
+    latest = list(ordered)[-1] if ordered else None
+    write_atomic(doc_root / "runs.json",
+                 json.dumps({"doc_id": doc_id, "latest": latest,
+                             "runs": ordered}, indent=2) + "\n")
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -1141,8 +1175,7 @@ def main() -> None:
     from docling_core.types.doc.base import ImageRefMode
     from docling_core.types.doc.document import DoclingDocument
 
-    args = [a for a in sys.argv[1:] if a != "--force"]
-    force = "--force" in sys.argv[1:]
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
     source = args[0] if args else ""
     if not source or source in ("-h", "--help"):
         sys.exit(__doc__)
@@ -1157,12 +1190,21 @@ def main() -> None:
     final = out / (f"{doc_id}.docling.json.gz" if COMPRESS_DOCUMENT
                    else f"{doc_id}.docling.json")
     chunks.mkdir(parents=True, exist_ok=True)
-    if final.exists() and not force:
-        log(f"{doc_id}: run {rid} already done -> {final}")
-        return
     if final.exists():
-        log(f"{doc_id}: redoing run {rid} (--force)")
+        # Nothing here overwrites a finished run. To redo one, delete its
+        # directory: an explicit removal rather than a flag that quietly
+        # destroys the output you wanted to compare against.
+        log(f"{doc_id}: run {rid} already done -> {final}")
+        log(f"{doc_id}: delete {out} to redo it")
+        rebuild_runs(doc_root, doc_id)
+        return
     log(f"{doc_id}: run {rid}")
+    # The script itself, beside its output. The signature records which code
+    # ran; this records what that code was. A run made from an edited working
+    # copy -- the normal case while settings are being tuned -- cannot be
+    # recovered from the repository afterwards, and the file is a few tens of
+    # kilobytes against a document of tens of megabytes.
+    shutil.copy2(Path(__file__).resolve(), out / "ingest.py")
     total = len(pdfium.PdfDocument(str(pdf)))
 
     device = pick_device()
@@ -1512,7 +1554,8 @@ def main() -> None:
         "page_count": total,
         "chunk_pages": CHUNK_PAGES,
         "docling_version": docling.__version__,
-        "ingest": ingest_fingerprint(),
+        "ingest": {**ingest_fingerprint(), "git": git_provenance(),
+                   "copy": "ingest.py"},
         "host": host_environment(device),
         "argv": sys.argv[1:],
         "geometry": geometry,
@@ -1610,8 +1653,9 @@ def main() -> None:
     write_atomic(out / f"{doc_id}.docling.meta.json",
                  json.dumps(meta, indent=2) + "\n")
     # One line per run of this document, so the effect of changing a setting
-    # is readable without opening two documents.
-    record_run(doc_root, doc_id, rid, meta)
+    # is readable without opening two documents. Rebuilt from the directories
+    # present, so it is always a description of what is actually on disk.
+    rebuild_runs(doc_root, doc_id)
     log(f"INGESTED {doc_id}: {len(ranges)} chunks in {time.time() - t0:.0f}s -> {out}")
 
 

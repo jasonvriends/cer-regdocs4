@@ -23,7 +23,7 @@ CER filings and are documented where they are non-obvious.
 ```bash
 ./setup.sh                              # create .venv, install docling
 .venv/bin/python ingest.py <pdf-or-url> # ingest one filing
-.venv/bin/python ingest.py <pdf> --force  # re-ingest after changing settings
+# change a setting and re-run: the new run lands beside the old
 ```
 
 Output is written per **run of settings**, not per document:
@@ -31,9 +31,15 @@ Output is written per **run of settings**, not per document:
 ```
 output/<id>/
   runs.json                       one line per run: settings in, results out
+  <run>/ingest.py                 the script that produced it, verbatim
   <run>/<id>.docling.json.gz      the document: structure, tables, provenance
   <run>/<id>.docling.meta.json    provenance, settings, per-page quality, doubts
 ```
+
+`runs.json` is derived and safe to delete — the next ingest rebuilds it from
+whatever run directories exist. Each run keeps a copy of `ingest.py`: the meta
+records which code ran, and the copy records what that code *was*, which a hash
+cannot if the run was made from an edited working copy.
 
 Every setting that changes the output goes into a run signature, and its short
 hash names the directory. The same settings land in the same place and are not
@@ -45,7 +51,9 @@ it. Comparing two parameter choices is then reading `runs.json`:
 c885606d  table_mode=accurate   44s  suspect_cells=1
 ```
 
-`--force` redoes a run that already exists.
+Nothing overwrites a finished run. To redo one, delete its directory — an
+explicit removal rather than a flag that quietly destroys the output you wanted
+to compare against.
 
 Markdown is a lossy projection and is not written; export it from the JSON when
 needed (`doc.export_to_markdown()`).
