@@ -248,16 +248,38 @@ level-2, all of the latter numbered and therefore recoverable from
 `use_numbering`). The two attachment boundaries are preserved separately in
 `meta.outline`.
 
-### 4.3 Refuse to re-run across a settings change
+### 4.3 One output directory per set of settings
 
 Every meaningful setting is a module constant, so two runs can differ while the
 `settings` block looks identical. `run_signature` records the script's sha256
-plus chunk size, raster scale, threshold and table mode. On a mismatch the run
-stops (exit 2) and prints what changed; `--force` overrides.
+plus chunk size, raster scale, thresholds and table mode, and its short hash
+names the output directory.
 
-Partial chunks from a different signature are discarded rather than reused —
-otherwise a run interrupted, edited and resumed would silently merge pages built
-two different ways.
+The same settings therefore land in the same place and are not redone, and a
+changed setting lands **beside** the previous run rather than over it. That is
+what makes "what did changing this parameter do" answerable:
+
+    310a9d38  table_mode=fast       28s  suspect_cells=0
+    c885606d  table_mode=accurate   44s  suspect_cells=1
+
+`runs.json` carries a line per run and is rebuilt from the directories present,
+so it always describes what is on disk and can be deleted without loss.
+
+This replaced an earlier design that refused to re-run across a settings change
+and offered `--force` to override. The flag's only purpose was to destroy the
+output you would want to compare against, and it cost this project a batch of
+metadata once: `ingest.py` was edited while a batch was running, and because the
+loop re-reads the file per document, the run produced documents under two
+different schemas. Nothing overwrites a finished run now; redoing one means
+deleting its directory.
+
+Each run also keeps a verbatim copy of `ingest.py`. The signature records which
+code ran; the copy records what that code was, which a hash cannot do once the
+file has changed. While settings are being tuned the usual case is a run from an
+edited working copy that was never committed — this project produced several,
+and their hashes now resolve to nothing. The git commit and whether the tree was
+dirty sit next to it, so a clean run traces to the repository and a dirty one
+says plainly that it cannot.
 
 ---
 
@@ -709,16 +731,23 @@ recording it:
 
 - `provenance.filing` -- title, company, submitter, project, filing number and
   date, from the filing's own record
-- `contents.headings` -- the document's structure as extracted
-- `contents.table_index` -- every table's header row, so "Parameter | Result |
-  Detection Limit" is findable without opening the document
-- `contents.labels` -- how much of the document is prose, tables, forms or
-  drawings
+- the extraction itself -- headings, tables and their columns are in the
+  document, and a pass over finished extractions can index them at about a
+  second per document
 
-So the answer to "should the meta know about monitoring reports and orders" is
-no, and it is not a question of size: the meta should carry the evidence and
-leave the verdict to something that can be re-run without re-reading 46 MB of
-PDF.
+An index of headings and table columns was built into the meta and then taken
+out again, which is worth recording because the reasoning ran the wrong way.
+The argument for it was cost: the document is gzipped and large, so why re-read
+it later. Measured, that cost is about a second per document -- hours for a
+large corpus, not a barrier. And the index kept growing toward interpretation:
+column names gave a table's shape but not its subject, so row labels followed,
+and at that point it had stopped describing the extraction and started
+describing the filing.
+
+Which is the line. The meta answers what produced this output and what went well
+or badly in it. What a document contains, and what it is, belong to a pass that
+can be corrected on its own schedule -- a classification rule that changes
+should not mean re-extracting a corpus.
 
 ### 12.1 One thing a downstream consumer needs from here
 
