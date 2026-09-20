@@ -204,6 +204,27 @@ The two that shaped the pipeline:
 PDFs and extraction output are deliberately kept out of git (`source/`,
 `output*/`).
 
+## Adding a document
+
+Copy the PDF into `source/`, with its metadata sidecar if the download pipeline
+wrote one:
+
+```bash
+cp ../cer-regdocs2/workspace/2_download/files/4647200.{pdf,metadata.json} source/
+```
+
+`ingest.py` reads `<pdf>.metadata.json` if it is there and records the filing's
+title, company, filing number and date in the meta, and checks the sidecar's
+sha256 against the bytes it actually read. Without a sidecar everything still
+works — the meta keeps the file hash and a REGDOCS download link derived from
+the filename and verified over the network — it just has no filing identifiers.
+
+A URL works too, and lands in `source/` under the document id:
+
+```bash
+.venv/bin/python ingest.py https://apps.cer-rec.gc.ca/REGDOCS/File/Download/4647200
+```
+
 ## Documentation
 
 - [docs/test_corpus.md](docs/test_corpus.md) — the sixteen filings used for

@@ -1,0 +1,160 @@
+nohup: ignoring input
+=== 4692070 ===
+[ingest] 4692070: run d44fa869
+[ingest] gpu: NVIDIA GeForce RTX 4090 (24 GB) -> cuda
+[ingest] 4692070: 437 pages, 437 chunks of 1, device=cuda
+[ingest] 4692070: 0 of 437 pages have an unusable text layer -> rasterized; the rest keep their exact text
+Preset 'granite_vision_v4' already registered for ChartExtractionVlmEngineOptions
+[32m[INFO] 2026-09-20 19:49:37,086 [RapidOCR] base.py:23: Using engine_name: torch[0m
+[32m[INFO] 2026-09-20 19:49:37,087 [RapidOCR] device_config.py:64: Using GPU device with ID: 0[0m
+[32m[INFO] 2026-09-20 19:49:37,124 [RapidOCR] download_file.py:60: File exists and is valid: /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/PP-OCRv6_det_medium.pth[0m
+[32m[INFO] 2026-09-20 19:49:37,125 [RapidOCR] main.py:50: Using /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/PP-OCRv6_det_medium.pth[0m
+[32m[INFO] 2026-09-20 19:49:37,550 [RapidOCR] base.py:23: Using engine_name: torch[0m
+[32m[INFO] 2026-09-20 19:49:37,551 [RapidOCR] device_config.py:64: Using GPU device with ID: 0[0m
+[32m[INFO] 2026-09-20 19:49:37,551 [RapidOCR] download_file.py:60: File exists and is valid: /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/ch_ptocr_mobile_v2.0_cls_mobile.pth[0m
+[32m[INFO] 2026-09-20 19:49:37,552 [RapidOCR] main.py:50: Using /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/ch_ptocr_mobile_v2.0_cls_mobile.pth[0m
+[32m[INFO] 2026-09-20 19:49:37,617 [RapidOCR] base.py:23: Using engine_name: torch[0m
+[32m[INFO] 2026-09-20 19:49:37,617 [RapidOCR] device_config.py:64: Using GPU device with ID: 0[0m
+[32m[INFO] 2026-09-20 19:49:37,668 [RapidOCR] download_file.py:60: File exists and is valid: /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/PP-OCRv6_rec_medium.pth[0m
+[32m[INFO] 2026-09-20 19:49:37,668 [RapidOCR] main.py:50: Using /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/PP-OCRv6_rec_medium.pth[0m
+Loading weights:   0%|          | 0/770 [00:00<?, ?it/s]Loading weights:  39%|███▉      | 302/770 [00:00<00:00, 3018.97it/s]Loading weights:  78%|███████▊  | 604/770 [00:00<00:00, 2562.45it/s]Loading weights: 100%|██████████| 770/770 [00:00<00:00, 2971.56it/s]
+[32m[INFO] 2026-09-20 19:49:41,716 [RapidOCR] base.py:23: Using engine_name: torch[0m
+[32m[INFO] 2026-09-20 19:49:41,716 [RapidOCR] device_config.py:64: Using GPU device with ID: 0[0m
+[32m[INFO] 2026-09-20 19:49:41,752 [RapidOCR] download_file.py:60: File exists and is valid: /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/PP-OCRv6_det_medium.pth[0m
+[32m[INFO] 2026-09-20 19:49:41,752 [RapidOCR] main.py:50: Using /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/PP-OCRv6_det_medium.pth[0m
+[32m[INFO] 2026-09-20 19:49:41,967 [RapidOCR] base.py:23: Using engine_name: torch[0m
+[32m[INFO] 2026-09-20 19:49:41,967 [RapidOCR] device_config.py:64: Using GPU device with ID: 0[0m
+[32m[INFO] 2026-09-20 19:49:41,968 [RapidOCR] download_file.py:60: File exists and is valid: /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/ch_ptocr_mobile_v2.0_cls_mobile.pth[0m
+[32m[INFO] 2026-09-20 19:49:41,968 [RapidOCR] main.py:50: Using /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/ch_ptocr_mobile_v2.0_cls_mobile.pth[0m
+[32m[INFO] 2026-09-20 19:49:42,028 [RapidOCR] base.py:23: Using engine_name: torch[0m
+[32m[INFO] 2026-09-20 19:49:42,028 [RapidOCR] device_config.py:64: Using GPU device with ID: 0[0m
+[32m[INFO] 2026-09-20 19:49:42,073 [RapidOCR] download_file.py:60: File exists and is valid: /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/PP-OCRv6_rec_medium.pth[0m
+[32m[INFO] 2026-09-20 19:49:42,073 [RapidOCR] main.py:50: Using /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/PP-OCRv6_rec_medium.pth[0m
+Loading weights:   0%|          | 0/770 [00:00<?, ?it/s]Loading weights:  53%|█████▎    | 405/770 [00:00<00:00, 4047.64it/s]Loading weights: 100%|██████████| 770/770 [00:00<00:00, 4414.71it/s]
+[32m[INFO] 2026-09-20 19:49:45,246 [RapidOCR] base.py:23: Using engine_name: torch[0m
+[32m[INFO] 2026-09-20 19:49:45,247 [RapidOCR] device_config.py:64: Using GPU device with ID: 0[0m
+[32m[INFO] 2026-09-20 19:49:45,253 [RapidOCR] download_file.py:60: File exists and is valid: /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/PP-OCRv6_det_small.pth[0m
+[32m[INFO] 2026-09-20 19:49:45,254 [RapidOCR] main.py:50: Using /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/PP-OCRv6_det_small.pth[0m
+[32m[INFO] 2026-09-20 19:49:45,369 [RapidOCR] base.py:23: Using engine_name: torch[0m
+[32m[INFO] 2026-09-20 19:49:45,370 [RapidOCR] device_config.py:64: Using GPU device with ID: 0[0m
+[32m[INFO] 2026-09-20 19:49:45,370 [RapidOCR] download_file.py:60: File exists and is valid: /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/ch_ptocr_mobile_v2.0_cls_mobile.pth[0m
+[32m[INFO] 2026-09-20 19:49:45,370 [RapidOCR] main.py:50: Using /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/ch_ptocr_mobile_v2.0_cls_mobile.pth[0m
+[32m[INFO] 2026-09-20 19:49:45,419 [RapidOCR] base.py:23: Using engine_name: torch[0m
+[32m[INFO] 2026-09-20 19:49:45,420 [RapidOCR] device_config.py:64: Using GPU device with ID: 0[0m
+[32m[INFO] 2026-09-20 19:49:45,431 [RapidOCR] download_file.py:60: File exists and is valid: /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/PP-OCRv6_rec_small.pth[0m
+[32m[INFO] 2026-09-20 19:49:45,432 [RapidOCR] main.py:50: Using /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/PP-OCRv6_rec_small.pth[0m
+Loading weights:   0%|          | 0/770 [00:00<?, ?it/s]Loading weights:  53%|█████▎    | 405/770 [00:00<00:00, 4037.43it/s]Loading weights: 100%|██████████| 770/770 [00:00<00:00, 4479.14it/s]
+[ingest] 1/437 pages 1-1: 14s
+[ingest] 2/437 pages 2-2: 7s
+[ingest] 3/437 pages 3-3: 4s
+[ingest] 4/437 pages 4-4: 3s
+[ingest] 5/437 pages 5-5: 4s
+[ingest] 6/437 pages 6-6: 2s
+[ingest] 7/437 pages 7-7: 3s
+[ingest] 8/437 pages 8-8: 4s
+[ingest] 9/437 pages 9-9: 4s
+[ingest] 10/437 pages 10-10: 9s
+[ingest] 11/437 pages 11-11: 2s
+[ingest] 12/437 pages 12-12: 8s
+[ingest] 13/437 pages 13-13: 7s
+[ingest] 14/437 pages 14-14: 10s
+[ingest] 15/437 pages 15-15: 9s
+[ingest] 16/437 pages 16-16: 5s
+[ingest] 17/437 pages 17-17: 2s
+[ingest] 18/437 pages 18-18: 4s
+[ingest] 19/437 pages 19-19: 3s
+[ingest] 20/437 pages 20-20: 4s
+[ingest] 21/437 pages 21-21: 3s
+[ingest] 22/437 pages 22-22: 3s
+[ingest] 23/437 pages 23-23: 3s
+[ingest] 24/437 pages 24-24: 3s
+[ingest] 25/437 pages 25-25: 3s
+[ingest] 26/437 pages 26-26: 2s
+[ingest] 27/437 pages 27-27: 3s
+[ingest] 28/437 pages 28-28: 4s
+[ingest] 29/437 pages 29-29: 4s
+[ingest] 30/437 pages 30-30: 4s
+[ingest] 31/437 pages 31-31: 5s
+[ingest] 32/437 pages 32-32: 5s
+[ingest] 33/437 pages 33-33: 4s
+[ingest] 34/437 pages 34-34: 2s
+[ingest] 35/437 pages 35-35: 6s
+[ingest] 36/437 pages 36-36: 5s
+[ingest] 37/437 pages 37-37: 4s
+[ingest] 38/437 pages 38-38: 4s
+[ingest] 39/437 pages 39-39: 2s
+[ingest] 40/437 pages 40-40: 3s
+[ingest] 41/437 pages 41-41: 4s
+[ingest] 42/437 pages 42-42: 2s
+[ingest] 43/437 pages 43-43: 5s
+[ingest] 44/437 pages 44-44: 6s
+[ingest] 45/437 pages 45-45: 4s
+[ingest] 46/437 pages 46-46: 5s
+[ingest] 47/437 pages 47-47: 5s
+[ingest] 48/437 pages 48-48: 5s
+[ingest] 49/437 pages 49-49: 3s
+[ingest] 50/437 pages 50-50: 4s
+[ingest] 51/437 pages 51-51: 4s
+[ingest] 52/437 pages 52-52: 5s
+[ingest] 53/437 pages 53-53: 3s
+[ingest] 54/437 pages 54-54: 4s
+[ingest] 55/437 pages 55-55: 4s
+[ingest] 56/437 pages 56-56: 3s
+[ingest] 57/437 pages 57-57: 7s
+[ingest] 58/437 pages 58-58: 4s
+[ingest] 59/437 pages 59-59: 9s
+[32m[INFO] 2026-09-20 19:54:09,750 [RapidOCR] base.py:23: Using engine_name: torch[0m
+[32m[INFO] 2026-09-20 19:54:09,751 [RapidOCR] device_config.py:64: Using GPU device with ID: 0[0m
+[32m[INFO] 2026-09-20 19:54:09,790 [RapidOCR] download_file.py:60: File exists and is valid: /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/PP-OCRv6_det_medium.pth[0m
+[32m[INFO] 2026-09-20 19:54:09,790 [RapidOCR] main.py:50: Using /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/PP-OCRv6_det_medium.pth[0m
+[32m[INFO] 2026-09-20 19:54:10,019 [RapidOCR] base.py:23: Using engine_name: torch[0m
+[32m[INFO] 2026-09-20 19:54:10,020 [RapidOCR] device_config.py:64: Using GPU device with ID: 0[0m
+[32m[INFO] 2026-09-20 19:54:10,021 [RapidOCR] download_file.py:60: File exists and is valid: /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/ch_ptocr_mobile_v2.0_cls_mobile.pth[0m
+[32m[INFO] 2026-09-20 19:54:10,021 [RapidOCR] main.py:50: Using /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/ch_ptocr_mobile_v2.0_cls_mobile.pth[0m
+[32m[INFO] 2026-09-20 19:54:10,087 [RapidOCR] base.py:23: Using engine_name: torch[0m
+[32m[INFO] 2026-09-20 19:54:10,087 [RapidOCR] device_config.py:64: Using GPU device with ID: 0[0m
+[32m[INFO] 2026-09-20 19:54:10,133 [RapidOCR] download_file.py:60: File exists and is valid: /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/PP-OCRv6_rec_medium.pth[0m
+[32m[INFO] 2026-09-20 19:54:10,133 [RapidOCR] main.py:50: Using /home/jasonvriends/repos/cer-regdocs4/.venv/lib/python3.12/site-packages/rapidocr/models/PP-OCRv6_rec_medium.pth[0m
+Loading weights:   0%|          | 0/770 [00:00<?, ?it/s]Loading weights:  45%|████▍     | 343/770 [00:00<00:00, 3410.37it/s]Loading weights:  90%|████████▉ | 692/770 [00:00<00:00, 3456.44it/s]Loading weights: 100%|██████████| 770/770 [00:00<00:00, 3561.94it/s]
+[ingest] 60/437 pages 60-60: accurate kept (0 cells dropped vs 12)
+[ingest] 60/437 pages 60-60: 14s
+[ingest] 61/437 pages 61-61: 5s
+[ingest] 62/437 pages 62-62: 4s
+[ingest] 63/437 pages 63-63: 5s
+[ingest] 64/437 pages 64-64: 6s
+[ingest] 65/437 pages 65-65: 4s
+[ingest] 66/437 pages 66-66: 4s
+[ingest] 67/437 pages 67-67: 3s
+[ingest] 68/437 pages 68-68: 5s
+[ingest] 69/437 pages 69-69: 5s
+[ingest] 70/437 pages 70-70: 6s
+[ingest] 71/437 pages 71-71: 4s
+[ingest] 72/437 pages 72-72: 4s
+[ingest] 73/437 pages 73-73: 4s
+[ingest] 74/437 pages 74-74: 3s
+[ingest] 75/437 pages 75-75: 4s
+[ingest] 76/437 pages 76-76: accurate kept (1 cells dropped vs 1)
+[ingest] 76/437 pages 76-76: 5s, 1 warning(s)
+[ingest] 77/437 pages 77-77: accurate kept (2 cells dropped vs 3)
+[ingest] 77/437 pages 77-77: 7s, 1 warning(s)
+[ingest] 78/437 pages 78-78: 3s
+[ingest] 79/437 pages 79-79: 3s
+[ingest] 80/437 pages 80-80: 4s
+[ingest] 81/437 pages 81-81: 3s
+[ingest] 82/437 pages 82-82: 3s
+[ingest] 83/437 pages 83-83: 3s
+[ingest] 84/437 pages 84-84: 3s
+[ingest] 85/437 pages 85-85: 4s
+[ingest] 86/437 pages 86-86: 3s
+[ingest] 87/437 pages 87-87: 4s
+[ingest] 88/437 pages 88-88: 3s
+[ingest] 89/437 pages 89-89: accurate kept (0 cells dropped vs 1)
+[ingest] 89/437 pages 89-89: 4s
+[ingest] 90/437 pages 90-90: 3s
+[ingest] 91/437 pages 91-91: 0s
+[ingest] 92/437 pages 92-92: 3s
+[ingest] 93/437 pages 93-93: 3s
+[ingest] 94/437 pages 94-94: 3s
+[ingest] 95/437 pages 95-95: 4s
+[ingest] 96/437 pages 96-96: 3s
+[ingest] 97/437 pages 97-97: 5s
