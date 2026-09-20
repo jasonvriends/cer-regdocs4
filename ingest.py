@@ -181,6 +181,10 @@ def build_converter(device: str, ocr_mode=None, table_mode=None, ocr_model="medi
     # reference on small print, against 98-100% for PDF_AWARE_LAYOUT_REGIONS.
     opts.do_ocr = True
     opts.ocr_options = RapidOcrOptions(backend="torch")
+    # Inert with the multi-language PP-OCRv6 models selected below: en, fr and
+    # la score identically on a scanned French filing in this corpus. Left
+    # explicit anyway, because RapidOcrOptions defaults to Chinese, and a
+    # future change of model family would otherwise inherit that silently.
     opts.ocr_options.lang = ["en"]
     opts.ocr_options.mode = ocr_mode or OcrMode.PDF_AWARE_LAYOUT_REGIONS
     # RapidOCR ships PP-OCRv6 "small" by default; "medium" is the same family
@@ -668,6 +672,52 @@ def _median(values: list) -> float:
         return 0.0
     mid = len(vals) // 2
     return float(vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2)
+
+
+MAX_INDEX_ENTRIES = 3000   # keeps the index a summary, not a second copy
+
+
+def content_index(doc) -> dict:
+    """What is in the document, without opening the document.
+
+    The document JSON is gzipped and can run to hundreds of megabytes, so a
+    question asked across a corpus -- which filings contain water-quality
+    result tables, what sections does this one have -- should not require
+    reading every one of them. The headings are the filing's structure as
+    extracted; the table headers are the handle for finding structured data,
+    since a table whose columns read "Parameter | Result | Detection Limit" is
+    a dataset whatever the document is called.
+    """
+    labels: dict = {}
+    for item in doc.texts:
+        labels[item.label] = labels.get(item.label, 0) + 1
+
+    headings = []
+    for item in doc.texts:
+        if item.label != "section_header":
+            continue
+        pages = [pr.page_no for pr in item.prov]
+        headings.append({"page": pages[0] if pages else None,
+                         "level": getattr(item, "level", None),
+                         "text": (item.text or "")[:160]})
+
+    tables = []
+    for t in doc.tables:
+        pages = [pr.page_no for pr in t.prov]
+        cells = t.data.table_cells
+        header = " | ".join((c.text or "").strip() for c in cells if c.column_header)
+        tables.append({"page": pages[0] if pages else None,
+                       "rows": t.data.num_rows, "cols": t.data.num_cols,
+                       "header": header[:160]})
+
+    return {
+        "labels": dict(sorted(labels.items(), key=lambda kv: -kv[1])),
+        "tables": len(tables), "pictures": len(doc.pictures),
+        "headings": headings[:MAX_INDEX_ENTRIES],
+        "headings_truncated": max(0, len(headings) - MAX_INDEX_ENTRIES),
+        "table_index": tables[:MAX_INDEX_ENTRIES],
+        "table_index_truncated": max(0, len(tables) - MAX_INDEX_ENTRIES),
+    }
 
 
 def dropped_cells(records: list[dict]) -> int:
@@ -1415,6 +1465,7 @@ def main() -> None:
         if report.get("warnings") or report.get("errors") or report.get("warnings_over_cap"):
             chunk_reports.append(report)  # clean chunks are omitted; counts stay exact
 
+    contents = content_index(merged)
     suspects = suspect_cells(merged)
     suspect_counts = {}
     for f in suspects:
@@ -1472,6 +1523,9 @@ def main() -> None:
         "host": host_environment(device),
         "argv": sys.argv[1:],
         "geometry": geometry,
+        # An index of the document's own contents, so a corpus-wide question
+        # does not require opening every document.
+        "contents": contents,
         "page_seconds": {
             "min": page_seconds[0] if page_seconds else None,
             "median": _median(page_seconds),
