@@ -20,12 +20,18 @@ works without it.
 | 3 | pick OCR mode per page | 98.7% | 99.9% | 884 | 2 | 2119s |
 | 4 | TableFormer `FAST` instead of `ACCURATE` | 98.8% | 99.9% | 882 | **0** | 1574s |
 | 5 | run both table modes, keep the better | 98.8% | **100.0%** | 885 | **0** | 1921s |
+| 6 | PP-OCRv6 `medium` models instead of `small` | **99.0%** | **100.0%** | **895** | **0** | 1781s |
 
 Coverage = share of the reference extraction's characters (normalised to
 `[0-9a-z]`) that also appear in docling's output for the same page. 972 of 986
 pages carry enough text to compare.
 
 Cells discarded by the table matcher fell **783 → 24** across the same runs.
+
+Run 6 swapped RapidOCR's PP-OCRv6 `small` detection and recognition models for
+`medium` — same family, one size up, no slower (1781s vs 1921s). 42 pages
+improved by more than 2 points, 21 slipped, and `ocr_empty` warnings halved
+(12 → 6).
 
 **The single most valuable finding:** the 316 badly-broken pages in run 1
 produced **no warnings at all**. docling thought it had succeeded. They were
@@ -156,12 +162,17 @@ cell is loud and recorded; a plausible fabricated number is neither. The same
 reasoning rules out granite-docling, Gemma and similar without a grounding
 check that rejects any output token absent from the page's OCR text.
 
-### 3.2 Rasterizing pages with a stub text layer
+### 3.2 Rasterizing pages with a stub text layer — REVERSED, see §6.1
 
-14 pages carry a 12-character text layer for a page holding ~1,000 words — they
-are scans with a stamp. Rasterizing them was a wash (84.8% vs 85.5% over six
-samples) and made page 376 worse, so the rule was removed. Only the
-control-character test survives.
+*This decision was wrong and has been undone. It is kept here because the
+reasoning looked sound and the measurement was real.*
+
+14 pages of the tuning document carry a 12-character text layer for a page
+holding ~1,000 words — scans with a stamp. Rasterizing them was a wash (84.8%
+vs 85.5% over six samples) and made page 376 worse, so the rule was removed.
+
+On a genuinely scanned filing the same rule is the difference between 13% and
+99% coverage. See §6.1.
 
 ### 3.3 Bigger OCR models as a fix for misread characters
 
@@ -281,7 +292,188 @@ failure.
 
 ---
 
-## 6. Where Azure is still better
+## 6. What generalising to 15 more filings found
+
+Runs 1-6 tuned everything against one document. Fifteen further filings
+(437-799 pages, 8,200 pages in total) were then ingested with the run-6
+settings and compared against the same reference extractor.
+
+**Fourteen of sixteen documents came out at 97.8-100.0% mean coverage**, most
+at 100.0% median with zero pages below 50%. Several needed no rasterization at
+all. The pipeline generalised.
+
+Two did not, and one of them failed badly:
+
+| doc | pages | mean | pages <50% | rasterized |
+|-----|------:|-----:|-----------:|-----------:|
+| 4692624 | 446 | 91.6% | 3 | 0 |
+| **4710294** | 424 | **13.2%** | **368** | **4** |
+
+### 6.1 The bug: a page with no text layer was left alone
+
+`unmapped_pages()` skipped any page whose text layer was empty, on the
+reasoning that OCR would handle it:
+
+```python
+if not text:
+    continue  # no text layer at all: OCR already handles these
+```
+
+4710294 is a scanned filing: **399 of its 463 pages have a completely empty
+text layer**. Left unrasterized they go to pdf-aware OCR, which produced
+*nothing*. Three sampled pages scored **0.0%** against the reference, and
+**100%, 99.5% and 88.0%** once rasterized.
+
+The rule that would have caught this — rasterize a page whose text layer is
+shorter than 100 characters — **had been tried and removed in §3.2**, because
+on the tuning document it looked like a wash (84.8% vs 85.5% over six pages).
+That document had 14 such pages. This one has 399.
+
+The measurement was not wrong; the sample was. A change that is neutral on the
+document you are holding can be the difference between 13% and 99% on the next
+one. `MIN_TEXT_CHARS = 100` is now in place, and §3.2 is superseded.
+
+### 6.2 What this says about the rest of the tuning
+
+Every default here was chosen against one filing: the 0.2 control-character
+threshold, `FAST`-first, the validator's rules, `medium` OCR models. One of
+them turned out to be catastrophically wrong on the second document type
+encountered. The others have not yet been tested that way — 4710294 was a
+scanned filing, and the corpus will contain other shapes that 4647200 does not
+represent.
+
+Treat the numbers in §1 as "this pipeline is good on filings like 4647200",
+not as a general accuracy claim.
+
+## 7. Choosing per page instead of configuring per corpus
+
+§6.1 was the second time a fixed setting, correct on the document in front of
+us, was wrong on the next one. The fix is not a better threshold. It is to stop
+letting thresholds decide the outcome.
+
+### 7.1 The principle
+
+Every decision that was wrong had the same shape: **classify the input, then
+trust the classification**. Every decision that held had the opposite shape:
+**produce a result, measure it, keep the better one**. The table-mode fallback
+(§2.5) was built that way and has never mispicked.
+
+So each page is now converted under several variants and the best output kept.
+The variants are declared in one list, `PAGE_VARIANTS`:
+
+| variant | what it changes |
+|---------|-----------------|
+| `as-is` | the page's own text layer, when it is sound |
+| `raster` | rendered so OCR is the only source |
+| `raster-sml` | the smaller OCR model |
+| `raster-hi` | a higher render scale |
+
+Adding a strategy is adding a line. The selector decides per page, so a setting
+that helps one filing and hurts another no longer needs a global answer.
+
+### 7.2 The score, and why it is that score
+
+Each result is scored as **characters produced, weighted by the share of them
+that are letters or digits**.
+
+The first version of this scored the share of characters that were *not
+printable*, and it missed mojibake entirely: `%  @ 8 ! C *&00 *` is ordinary
+punctuation. Letters-and-digits separates cleanly:
+
+| page | alnum share |
+|------|------------:|
+| mojibake | 0.11 |
+| recovered text | 0.81 |
+| dense numeric table | 0.68 |
+
+### 7.3 Validation
+
+A selector that picks the wrong variant is worse than no selector. It was
+checked against the independent extraction on **47 page comparisons** spanning
+two documents and four dimensions -- staging, render scale, OCR model size, and
+a six-way sweep on known-weak pages. **It picked the closer output every
+time**, including between variants that both looked reasonable:
+
+- a page scoring 77.6% as-is and 84.1% rasterized, where neither looked broken
+- a page at 94.7% that reached 98.1% at a higher render scale
+- three weak pages where the best of six variants was chosen with zero loss
+
+With the input detector disabled entirely, both historical failures self-healed:
+mojibake 991 -> 3,022 characters, and two scanned pages 0 -> 1,588 and 1,052.
+
+### 7.4 Argmax alone is harmful; the margin matters
+
+Taking the highest score outright makes clean pages slightly worse. Four
+variants reading a sound page correctly score within a fraction of a percent of
+each other, and at that resolution the score is noise. On one page argmax swapped
+the page's exact embedded text (3,483 characters) for an OCR pass that scored
+0.4% higher on 3,316 characters, losing accuracy for nothing.
+
+So the first variant is an incumbent and another takes over only by a clear
+margin. Calibrated over 24 pages from three filings:
+
+| margin | mean coverage | switches |
+|--------|--------------:|---------:|
+| never switch | 97.99% | 0 |
+| 0% (pure argmax) | 98.52% | 6 |
+| **1-3%** | **98.55%** | 2 |
+| 5% | 98.22% | 1 |
+
+`SWITCH_MARGIN = 0.02`. Near-ties keep the text layer; rescues still happen,
+because a rescue is not a near-tie -- the mojibake page scored 114 against
+2,472.
+
+### 7.5 What each variant is worth
+
+One filing (4664850, 481 comparable pages), same pages, variants added in turn:
+
+| variants | mean | pages >=95% | time |
+|----------|-----:|------------:|-----:|
+| 1 (detector's choice only) | 97.8% | 405 | ~400s |
+| 2 (+ the other staging) | 98.2% | 410 | 843s |
+| **4 (+ smaller model, higher scale)** | **98.6%** | **421** | 1603s |
+
+Each doubling of cost bought about 0.4 points. Which variant won, per page:
+`as-is` 410, `raster` 38, `raster-sml` 23, `raster-hi` 11 -- so the two extra
+variants decided 7% of pages.
+
+That is the trade to revisit for a very large corpus: dropping to two variants
+halves the runtime and costs ~0.4 points.
+
+### 7.6 The document that failed, re-run
+
+4710294 is the scanned filing that scored 13.2% in §6, with 368 of 424 pages
+below half the reference. Under per-page variant selection, with no setting
+specific to it:
+
+| | before | after |
+|---|------:|------:|
+| mean coverage | 13.2% | **96.0%** |
+| median | 0.0% | **99.8%** |
+| pages >=95% | 55 | **376** |
+| pages <50% | **368** | **11** |
+
+Variant wins: `raster` 350, `as-is` 56, `raster-hi` 33, `raster-sml` 24. The
+pipeline worked out for itself that this document needs rendering, page by
+page, without being told.
+
+Ten of the eleven remaining weak pages are drawings with no table on them --
+the known gap where the layout stage treats a map as one picture and never
+reads inside it (§8). That is a characterised limitation, not an unknown.
+
+### 7.7 What it costs, and what it does not fix
+
+One conversion per variant per page. The thresholds still order the attempts,
+so the likely winner goes first and the logs stay readable, but they no longer
+decide anything.
+
+This catches gross failure and plausible-but-worse output. It does **not**
+catch a confident wrong answer: `<3hT` read as `<31T` scores perfectly. That
+class needs the column validator in §5.1, and ultimately sampling with human
+review. At corpus scale, assume a residual silent-error rate and design
+downstream for it.
+
+## 8. Where Azure is still better
 
 Measured against the run-5 output.
 
@@ -319,7 +511,7 @@ are already global.
 
 ---
 
-## 7. Where the numbers actually stand
+## 9. Where the numbers actually stand
 
 Character coverage overstates the problem: it counts a missing `the` the same as
 a wrong digit. On the substance:
@@ -336,7 +528,7 @@ files under `texts` rather than table cells — placement, not loss.
 
 ---
 
-## 8. Known intermittent failure
+## 10. Known intermittent failure
 
 One run died at page 28 with `'builtin_function_or_method' object is not
 subscriptable`, raised inside `DocumentConverter.convert`. The same page
@@ -349,7 +541,7 @@ page that needed it in `retried_pages`. A 986-page run should not end because
 one page failed once — but a pipeline that fails intermittently is worth
 watching, so the retries are recorded rather than swallowed.
 
-## 9. Open items
+## 11. Open items
 
 - **Figure text pass — implemented but disabled (`FIGURE_PASS = False`).** It
   works: 44 words recovered from the page 453 map. But the run then hung after

@@ -38,16 +38,32 @@ needed (`doc.export_to_markdown()`).
 
 ## What it does per page
 
-- **Detects unusable text layers.** Many filings contain pages whose embedded
-  text is raw glyph codes from a font with no `ToUnicode` map. Those pages are
-  rasterized so OCR becomes the only source; every other page keeps its exact
-  PDF text.
-- **Chooses the OCR mode to match.** Full-page OCR on rasterized pages,
-  pdf-aware OCR everywhere else. Using either one everywhere measurably hurts.
-- **Runs both TableFormer modes when a table loses cells** and keeps whichever
-  result discards fewer.
-- **Converts one page at a time**, so every warning names an exact page and an
-  interrupted run resumes from the last finished one.
+**Every page is converted several ways and the best result kept.** The variants
+are declared in one list (`PAGE_VARIANTS`) — the page as it comes, the page
+rendered so OCR is the only source, a smaller OCR model, a higher render
+scale — and each result is scored on characters produced weighted by the share
+that are letters or digits. That separates real text from mojibake without
+anything to compare against.
+
+This exists because fixed settings kept being right for one filing and wrong
+for the next. Thresholds now only decide which variant is *tried first*; they
+no longer decide the outcome, so a threshold tuned on the wrong corpus costs
+time rather than content.
+
+The selector was validated against an independent extraction on 47 page
+comparisons and picked the closer output every time. With the input detection
+disabled entirely, both of this pipeline's historical failures self-healed.
+
+Also per page:
+
+- **Both TableFormer modes are run when a table loses cells**, keeping whichever
+  discards fewer — neither mode wins everywhere.
+- **Conversion is one page at a time**, so every warning names an exact page and
+  an interrupted run resumes from the last finished one.
+- **A failed page is retried once** before the run is abandoned.
+
+Adding a new strategy means adding a line to `PAGE_VARIANTS`. Removing variants
+trades accuracy for speed; the list is the knob.
 
 ## What it records about its own output
 
@@ -70,15 +86,29 @@ The worst failure found so far — 315 pages of mojibake — was completely sile
 
 ## Accuracy
 
-Measured against an independent extraction of the same 986-page filing:
+Measured against an independent extraction of the same filings.
+
+Per-page variant selection, on the two documents where it has been measured
+end to end:
+
+| document | before | after |
+|---|---|---|
+| 4664850 (481 pages) | 97.8% mean | **98.6%** mean, 421 of 481 pages ≥95% |
+| 4710294 (424 pages, scanned) | 13.2% mean, 368 pages <50% | **96.0%** mean, 11 pages <50% |
+
+On the tuning document (4647200, 972 comparable pages), before variant
+selection:
 
 | | |
 |---|---|
-| mean character coverage | **98.8%** (median 100.0%) |
-| pages ≥95% | 885 of 972 |
+| mean character coverage | 99.0% (median 100.0%) |
+| pages ≥95% | 895 of 972 |
 | pages <50% | **0** |
 | numeric tokens in tables agreeing | **96.9%** |
 | detection limits (`<x`) found | **19,831 vs 19,831** |
+
+Coverage counts characters, so it weighs a missing "the" the same as a wrong
+digit. Numeric agreement is the more meaningful figure for this corpus.
 
 ## Test document
 

@@ -12,7 +12,8 @@ elsewhere), TableFormer for tables in fast mode with an accurate-mode fallback
 (see the chunk loop), heading levels from legal numbering.
 
 Each page is staged before conversion. Pages whose text layer is unmapped glyph
-codes (a font with no ToUnicode map) are rasterized, because docling's table
+codes, or that carry no usable text layer at all, are rasterized, because
+docling's table
 stage reads the text layer directly and would otherwise emit mojibake in every
 table cell whatever the OCR settings. Every other page is passed through
 untouched and keeps its exact text. On the first 986-page filing that was 315
@@ -128,7 +129,7 @@ def fetch_pdf(source: str, dest: Path) -> Path:
     return dest
 
 
-def build_converter(device: str, ocr_mode=None, table_mode=None):
+def build_converter(device: str, ocr_mode=None, table_mode=None, ocr_model="medium"):
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import (
         OcrMode,
@@ -161,9 +162,10 @@ def build_converter(device: str, ocr_mode=None, table_mode=None):
     # "tiny" variant was worse than both, at 79.8%.
     from rapidocr import ModelType as _ModelType
 
+    _size = {"medium": _ModelType.MEDIUM, "small": _ModelType.SMALL,
+             "tiny": _ModelType.TINY}[ocr_model]
     opts.ocr_options.rapidocr_params = {
-        "Det.model_type": _ModelType.MEDIUM,
-        "Rec.model_type": _ModelType.MEDIUM,
+        "Det.model_type": _size, "Rec.model_type": _size,
     }
 
     # Table mode is chosen per page by the caller, defaulting to FAST. Neither
@@ -440,6 +442,106 @@ def figure_text(pdf: Path, page_no: int, already: set[str]) -> list[str]:
     return found
 
 
+# Each page is converted under every one of these and the best output kept.
+# Adding a strategy is adding a line here: the selector decides per page, so a
+# variant that helps one filing and hurts another can simply be listed. Every
+# entry below was validated against an independent extraction before being
+# added -- across 47 page comparisons the score picked the closer output every
+# time, including between variants that both looked reasonable.
+#
+#   as-is      keeps the page's exact embedded text, best when it is sound
+#   raster     renders the page so OCR is the only source; rescues pages whose
+#              text layer is unmapped glyph codes or missing entirely
+#   raster-sml the smaller OCR model, which wins on roughly 3 pages in 10
+#   raster-hi  a higher render scale, which wins on roughly 3 pages in 10
+#
+# Cost is one conversion per variant per page. Trim the list for speed.
+PAGE_VARIANTS = [
+    {"name": "as-is",      "raster": False, "scale": None, "ocr_model": "medium"},
+    {"name": "raster",     "raster": True,  "scale": 3.0,  "ocr_model": "medium"},
+    {"name": "raster-sml", "raster": True,  "scale": 3.0,  "ocr_model": "small"},
+    {"name": "raster-hi",  "raster": True,  "scale": 4.5,  "ocr_model": "medium"},
+]
+# A variant must beat the incumbent by this much before it is taken. Scores
+# differ by a fraction of a percent between variants that are all reading the
+# page correctly, and at that resolution the score is noise: on a clean page
+# argmax would swap exact embedded text for an OCR pass scoring 0.4% higher
+# and lose a little accuracy. Calibrated over 24 pages from three filings --
+# never switching scored 98.0%, pure argmax 98.5%, a 1-3% margin 98.55%.
+SWITCH_MARGIN = 0.02
+MIN_PAGE_CHARS = 50       # below this a page produced essentially nothing
+MIN_ALNUM_RATIO = 0.35    # below this the "text" is not made of characters
+
+
+def page_quality(result) -> dict:
+    """Score a converted page on its own terms, with nothing to compare against.
+
+    Both failures this pipeline has had were plain in its own output. A page
+    whose text layer was unmapped glyph codes came out as '%  @ 8 ! C *&00 *':
+    992 characters, only 11% of them letters or digits. A scanned page left
+    unrasterized came out empty. Neither needed a second extraction to spot.
+
+    The measure is the share of characters that are letters or digits, not the
+    share that are unprintable -- mojibake arrives as ordinary punctuation. A
+    dense numeric table still scores about 0.68, well clear of the threshold.
+    """
+    parts = [item.text or "" for item in result.document.texts]
+    parts += [c.text or "" for t in result.document.tables for c in t.data.table_cells]
+    text = " ".join(parts)
+    n = len(text)
+    if n == 0:
+        return {"chars": 0, "alnum_ratio": 0.0, "score": 0.0}
+    alnum = sum(1 for ch in text if ch.isalnum()) / n
+    return {"chars": n, "alnum_ratio": round(alnum, 4),
+            "score": round(n * alnum, 1)}
+
+
+def looks_broken(quality: dict) -> bool:
+    """Gross failure only: nothing extracted, or output that is not characters.
+
+    Deliberately not a quality bar. A genuinely blank or sparse page trips this
+    and costs one extra conversion, which is cheaper than shipping a page of
+    mojibake.
+    """
+    return (quality["chars"] < MIN_PAGE_CHARS
+            or quality["alnum_ratio"] < MIN_ALNUM_RATIO)
+
+
+def convert_staged(pdf: Path, start: int, end: int, raster: bool,
+                   converters: dict, staged: Path, label: str,
+                   scale: float = None, ocr_model: str = "medium",
+                   table_mode: str = None):
+    """Stage these pages one way and convert them, retrying once on failure.
+
+    A single page failing must not end a 986-page run: conversion has been seen
+    to fail once and then succeed on identical input, so a failure is retried
+    before it is believed.
+    """
+    pages = set(range(start, end + 1)) if raster else set()
+    result = retries = None
+    for attempt in (1, 2):
+        with WarningCapture() as cap:
+            n_raster = build_chunk_pdf(pdf, start, end, pages, staged, scale)
+            try:
+                key = (n_raster > 0, ocr_model, table_mode or TABLE_MODE)
+                result = converters[key].convert(str(staged))
+            except Exception as exc:
+                if attempt == 2:
+                    raise
+                retries = f"{type(exc).__name__}: {exc}"
+                log(f"{label}: {retries} -- retrying")
+                gc.collect()
+                continue
+        if result.status.value == "success":
+            return result, cap, n_raster, retries
+        if attempt == 2:
+            raise RuntimeError(f"{label} failed: {result.status}")
+        retries = f"status={result.status.value}"
+        log(f"{label}: {retries} -- retrying")
+        gc.collect()
+    raise RuntimeError(f"{label}: conversion did not succeed")
+
+
 def dropped_cells(records: list[dict]) -> int:
     """Total PDF cells the table matcher could not place, across a page."""
     return sum(r.get("cells_dropped", 0) for r in records
@@ -510,6 +612,7 @@ def ocr_model_files() -> dict:
 
 RASTER_SCALE = 3.0    # ~216 dpi: enough for 8pt table text, ~0.5 MB/page
 UNMAPPED_RATIO = 0.2  # share of control chars above which a text layer is junk
+MIN_TEXT_CHARS = 100  # below this a "text layer" is a scan's stub, not content
 TABLE_MODE = "fast"   # tried first; the other mode is used when this one drops
                       # cells. Over 986 pages the fallback fired on 27 and took
                       # cells dropped from 153 to 24
@@ -529,10 +632,15 @@ def unmapped_pages(pdf: Path, total: int) -> set[int]:
     bad = set()
     for i in range(total):
         text = doc[i].get_textpage().get_text_range() or ""
-        # Pages carrying only a stub text layer (a dozen characters for a
-        # page of scanned tables) were tried here too: rasterizing them was a
-        # wash, 84.8% against 85.5% over six samples, so they are left alone.
-        if not text:
+        # A page with no text layer, or only a stub of one, must be rasterized
+        # too. Left alone it goes to pdf-aware OCR and yields nothing at all:
+        # on a scanned filing three sampled pages scored 0.0% against the
+        # reference, and 100%, 99.5% and 88.0% once rasterized. An earlier
+        # version skipped these because on a mostly-digital filing the change
+        # looked like a wash (84.8% vs 85.5% over six pages); that document
+        # had 14 such pages, the scanned one has 399.
+        if len(text) < MIN_TEXT_CHARS:
+            bad.add(i + 1)
             continue
         ctrl = sum(1 for ch in text if ord(ch) < 32 and ch not in "\r\n\t")
         if ctrl / len(text) > UNMAPPED_RATIO:
@@ -564,7 +672,8 @@ def read_outline(pdf: Path) -> list[dict]:
     return out
 
 
-def build_chunk_pdf(pdf: Path, start: int, end: int, bad: set[int], dest: Path) -> int:
+def build_chunk_pdf(pdf: Path, start: int, end: int, bad: set[int], dest: Path,
+                    scale: float = None) -> int:
     """One PDF for this chunk: broken pages as images, good pages untouched.
 
     Rasterizing everything would cost the exact text on pages that were already
@@ -579,10 +688,10 @@ def build_chunk_pdf(pdf: Path, start: int, end: int, bad: set[int], dest: Path) 
 
     raster_doc = None
     if to_raster:
-        images = [src[n - 1].render(scale=RASTER_SCALE).to_pil().convert("RGB")
+        images = [src[n - 1].render(scale=scale or RASTER_SCALE).to_pil().convert("RGB")
                   for n in to_raster]
         buf = io.BytesIO()
-        images[0].save(buf, "PDF", resolution=72 * RASTER_SCALE,
+        images[0].save(buf, "PDF", resolution=72 * (scale or RASTER_SCALE),
                        save_all=True, append_images=images[1:])
         buf.seek(0)
         raster_doc = pdfium.PdfDocument(buf)
@@ -650,6 +759,11 @@ def run_signature() -> dict:
         "chunk_pages": CHUNK_PAGES,
         "raster_scale": RASTER_SCALE,
         "unmapped_ratio": UNMAPPED_RATIO,
+        "min_text_chars": MIN_TEXT_CHARS,
+        "variants": [v["name"] for v in PAGE_VARIANTS],
+        "switch_margin": SWITCH_MARGIN,
+        "min_page_chars": MIN_PAGE_CHARS,
+        "min_alnum_ratio": MIN_ALNUM_RATIO,
         "figure_pass": FIGURE_PASS,
         "table_mode": TABLE_MODE,
         "table_mode_fallback": True,
@@ -749,12 +863,16 @@ def main() -> None:
     # need full-page OCR; the rest keep their exact text.
     from docling.datamodel.pipeline_options import OcrMode as _OcrMode
     from docling.datamodel.pipeline_options import TableFormerMode as _TFMode
+    # One converter per (staging, ocr model, table mode) actually used. Built
+    # once: model loading dominates, conversion does not.
+    models = {v["ocr_model"] for v in PAGE_VARIANTS}
     converters = {
-        (raster, tname): build_converter(
+        (raster, model, tname): build_converter(
             device,
             _OcrMode.FULL_PAGE if raster else _OcrMode.PDF_AWARE_LAYOUT_REGIONS,
-            tmode)
+            tmode, model)
         for raster in (True, False)
+        for model in models
         for tname, tmode in (("fast", _TFMode.FAST), ("accurate", _TFMode.ACCURATE))
     }
     t0 = time.time()
@@ -765,32 +883,67 @@ def main() -> None:
             log(f"{i}/{len(ranges)} pages {start}-{end}: already done")
             continue
         t1 = time.time()
-        staged = chunks / f"pg-{start:04d}-{end:04d}.staged.pdf"
-        # One page failing must not end a 986-page run. Conversion has been
-        # seen to fail once and then succeed on the identical input, so a
-        # failure is retried before it is believed. Both attempts are recorded.
-        result = retries = None
-        for attempt in (1, 2):
-            with WarningCapture() as cap:
-                n_raster = build_chunk_pdf(pdf, start, end, bad_pages, staged)
-                # With CHUNK_PAGES = 1 this is exact. For a wider chunk it
-                # falls back to full-page OCR if any page in it was rasterized.
-                try:
-                    result = converters[(n_raster > 0, TABLE_MODE)].convert(str(staged))
-                except Exception as exc:
-                    if attempt == 2:
-                        raise
-                    retries = f"{type(exc).__name__}: {exc}"
-                    log(f"{i}/{len(ranges)} pages {start}-{end}: {retries} -- retrying")
-                    gc.collect()
-                    continue
-            if result.status.value == "success":
-                break
-            if attempt == 2:
-                raise RuntimeError(f"pages {start}-{end} failed: {result.status}")
-            retries = f"status={result.status.value}"
-            log(f"{i}/{len(ranges)} pages {start}-{end}: {retries} -- retrying")
-            gc.collect()
+        # Staging is not guessed at, it is decided by result. Every variant in
+        # PAGE_VARIANTS is run and the best output kept, scored by how many
+        # characters were produced weighted by the share that are letters or
+        # digits -- which separates real text from mojibake.
+        #
+        # Validated against an independent extraction on 47 page comparisons:
+        # the score picked the closer output every time, including between
+        # variants that both looked reasonable. One page scored 77.6% under
+        # the first variant and 84.1% under another, a difference no failure
+        # check would have noticed.
+        #
+        # The text-layer thresholds now only order the attempts, so the usual
+        # winner is tried first and the log reads sensibly. A threshold tuned
+        # on the wrong corpus costs time here, not content.
+        first_raster = any(n in bad_pages for n in range(start, end + 1))
+        variants = sorted(PAGE_VARIANTS, key=lambda v: v["raster"] != first_raster)
+        label = f"{i}/{len(ranges)} pages {start}-{end}"
+        attempts, staged_paths = [], {}
+        for v in variants:
+            path = chunks / f"pg-{start:04d}-{end:04d}.{v['name']}.pdf"
+            try:
+                res, res_cap, res_n, res_retry = convert_staged(
+                    pdf, start, end, v["raster"], converters, path, label,
+                    scale=v.get("scale"), ocr_model=v.get("ocr_model", "medium"))
+            except Exception as exc:
+                log(f"{label}: variant {v['name']} failed ({exc})")
+                path.unlink(missing_ok=True)
+                continue
+            staged_paths[v["name"]] = path
+            attempts.append({"variant": v, "result": res, "cap": res_cap,
+                             "n_raster": res_n, "retry": res_retry,
+                             "quality": page_quality(res)})
+        if not attempts:
+            raise RuntimeError(f"{label}: every variant failed")
+
+        # The first variant is the incumbent; another takes over only by a
+        # clear margin, so near-ties keep the text layer rather than trading it
+        # for an OCR pass that scored a fraction higher.
+        best = attempts[0]
+        for a in attempts[1:]:
+            if a["quality"]["score"] > best["quality"]["score"] * (1 + SWITCH_MARGIN):
+                best = a
+        result, cap = best["result"], best["cap"]
+        n_raster, retries = best["n_raster"], best["retry"]
+        quality = best["quality"]
+        staging_used = best["variant"]["name"]
+        staged = staged_paths[staging_used]
+        for name, path in staged_paths.items():
+            if name != staging_used:
+                path.unlink(missing_ok=True)
+
+        staging_scores = {a["variant"]["name"]: a["quality"] for a in attempts}
+        restaged = None
+        if len(attempts) > 1 and staging_used != variants[0]["name"]:
+            firstq = staging_scores.get(variants[0]["name"], {})
+            restaged = {"from": variants[0]["name"], "to": staging_used,
+                        "scores": staging_scores, "kept": True}
+            log(f"{label}: kept variant {staging_used} "
+                f"({firstq.get('chars', 0)} chars -> {quality['chars']})")
+        for a in attempts:
+            a.pop("result", None); a.pop("cap", None)
 
         # Neither table mode wins everywhere: fast rescues the large forms that
         # accurate collapses to a 1x1 grid, accurate keeps small two-column
@@ -803,7 +956,9 @@ def main() -> None:
         if dropped_cells(cap.records):
             other = "accurate" if TABLE_MODE == "fast" else "fast"
             with WarningCapture() as cap2:
-                result2 = converters[(n_raster > 0, other)].convert(str(staged))
+                result2 = converters[
+                    (n_raster > 0, best["variant"].get("ocr_model", "medium"), other)
+                ].convert(str(staged))
             if result2.status.value == "success":
                 a, b = dropped_cells(cap.records), dropped_cells(cap2.records)
                 better = b < a or (b == a and table_text(result2) > table_text(result))
@@ -848,6 +1003,10 @@ def main() -> None:
             "status": result.status.value,
             "rasterized_pages": n_raster,
             "table_mode": table_mode_used,
+            "staging": staging_used,
+            "quality": quality,
+            "staging_scores": staging_scores,
+            "restaged": restaged,
             "figure_text": figure_words,
             "retried": retries,
             "table_mode_alternate": alternate,
@@ -881,6 +1040,7 @@ def main() -> None:
     chunk_reports, kind_counts = [], {}
     conf_totals, low_confidence, table_mode_overrides = {}, [], []
     structure_disagreements, figure_pages, retried_pages = [], [], []
+    restaged_pages, near_empty_pages, variant_wins = [], [], {}
     for start, end in ranges:
         warn_file = chunks / f"pg-{start:04d}-{end:04d}.warnings.json"
         if not warn_file.exists():
@@ -895,6 +1055,18 @@ def main() -> None:
         # A page converted with the non-default table mode leaves no warning
         # once the better result is kept, so record the swap here or the meta
         # would not show that the page was handled differently.
+        won = report.get("staging")
+        if won:
+            variant_wins[won] = variant_wins.get(won, 0) + 1
+        if report.get("restaged"):
+            restaged_pages.append({"page_start": report["page_start"],
+                                   "page_end": report["page_end"],
+                                   **report["restaged"]})
+        q = report.get("quality") or {}
+        if q and q.get("chars", 0) < MIN_PAGE_CHARS:
+            near_empty_pages.append({"page_start": report["page_start"],
+                                     "chars": q.get("chars"),
+                                     "alnum_ratio": q.get("alnum_ratio")})
         if report.get("retried"):
             retried_pages.append({"page_start": report["page_start"],
                                   "page_end": report["page_end"],
@@ -987,6 +1159,14 @@ def main() -> None:
         "suspect_cell_total": len(suspects),
         "suspect_cells": suspects[:MAX_SUSPECT_CELLS],
         "suspect_cells_truncated": max(0, len(suspects) - MAX_SUSPECT_CELLS),
+        # Pages whose first staging produced grossly broken output and were
+        # converted again the other way. The thresholds that pick the first
+        # staging are a guess; this is the check on that guess.
+        "restaged_pages": restaged_pages,
+        "variant_wins": variant_wins,
+        # Pages that still came out with almost no text after all of the above.
+        # Usually genuinely blank; worth a look when they are not.
+        "near_empty_pages": near_empty_pages,
         # Pages that failed once and succeeded on a retry. A page here came
         # out fine, but a pipeline that fails intermittently is worth watching.
         "retried_pages": retried_pages,
