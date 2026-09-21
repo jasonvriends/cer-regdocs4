@@ -2,6 +2,7 @@
 """Ingest a PDF into docling JSON, one page at a time.
 
     ingest.py <pdf-path-or-url>
+    ingest.py --cleanup
 
 Output is written per run of settings, not per document. Every setting that
 changes the output goes into a run signature, and its short hash names the
@@ -11,6 +12,11 @@ a parameter is a diff of two directories instead of a memory of what used to be
 there.
 
 Nothing overwrites a finished run. To redo one, delete its directory.
+
+--cleanup keeps each document's newest finished run and deletes the older ones,
+once a setting has been chosen and the comparisons are no longer wanted. It
+leaves runs/ alone, so the code behind a deleted run stays on record, and it
+leaves unfinished runs alone, since one may be in progress.
 
 Everything is fixed: a CUDA GPU with 16 GB or more is used when present and the
 CPU (8 threads) otherwise, RapidOCR (full-page on rasterized pages, pdf-aware
@@ -1253,6 +1259,51 @@ def run_id(signature: dict) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()[:8]
 
 
+def cleanup_runs(root: Path = Path("output")) -> None:
+    """Keep each document's newest finished run and delete the older ones.
+
+    Runs accumulate one directory per set of settings, which is the point while
+    a parameter is being chosen and clutter once it has been. Only the output
+    is removed: runs/<run id>.py stays, so the code behind a deleted run is
+    still on record even though its extraction is not.
+
+    A run without a finished document is left alone. It is either in progress
+    or was interrupted, and deleting a directory out from under a running
+    conversion is a mistake this project has already made once.
+    """
+    removed = kept = skipped = 0
+    for doc_dir in sorted(d for d in root.iterdir() if d.is_dir()):
+        doc_id = doc_dir.name
+        finished, unfinished = [], []
+        for run_dir in sorted(d for d in doc_dir.iterdir() if d.is_dir()):
+            meta = run_dir / f"{doc_id}.docling.meta.json"
+            if not meta.exists():
+                unfinished.append(run_dir)
+                continue
+            try:
+                when = json.loads(meta.read_text()).get("ingested_at") or ""
+            except Exception:
+                when = ""
+            finished.append((when, run_dir))
+        skipped += len(unfinished)
+        for run_dir in unfinished:
+            log(f"{doc_id}: leaving {run_dir.name} alone (no finished document)")
+        if len(finished) <= 1:
+            kept += len(finished)
+            continue
+        finished.sort()
+        newest = finished[-1][1]
+        for _, run_dir in finished[:-1]:
+            shutil.rmtree(run_dir)
+            log(f"{doc_id}: removed {run_dir.name}")
+            removed += 1
+        kept += 1
+        log(f"{doc_id}: kept {newest.name}")
+        rebuild_runs(doc_dir, doc_id)
+    log(f"cleanup: {removed} run(s) removed, {kept} kept, "
+        f"{skipped} unfinished left alone; runs/ untouched")
+
+
 def rebuild_runs(doc_root: Path, doc_id: str) -> None:
     """Summarise every run of this document, so settings can be compared.
 
@@ -1308,7 +1359,11 @@ def main() -> None:
     from docling_core.types.doc.base import ImageRefMode
     from docling_core.types.doc.document import DoclingDocument
 
+    flags = [a for a in sys.argv[1:] if a.startswith("-")]
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    if "--cleanup" in flags:
+        cleanup_runs()
+        return
     source = args[0] if args else ""
     if not source or source in ("-h", "--help"):
         sys.exit(__doc__)
