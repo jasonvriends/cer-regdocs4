@@ -2,7 +2,7 @@
 """Ingest a PDF into docling JSON, one page at a time.
 
     ingest.py <pdf-path-or-url>
-    ingest.py --cleanup
+    ingest.py --cleanup [--apply] [--keep-run=<id>]
 
 Output is written per run of settings, not per document. Every setting that
 changes the output goes into a run signature, and its short hash names the
@@ -13,10 +13,11 @@ there.
 
 Nothing overwrites a finished run. To redo one, delete its directory.
 
---cleanup keeps each document's newest finished run and deletes the older ones,
-once a setting has been chosen and the comparisons are no longer wanted. It
-leaves runs/ alone, so the code behind a deleted run stays on record, and it
-leaves unfinished runs alone, since one may be in progress.
+--cleanup keeps each document's newest finished run and reports which older ones
+would go; --apply then deletes them. --keep-run pins a run other than the newest.
+It leaves runs/ alone, so the code behind a deleted run stays on record, and it
+leaves unfinished runs alone, since one may be in progress. Keeping the script
+is not keeping the extraction, so nothing is deleted without being asked twice.
 
 Everything is fixed: a CUDA GPU with 16 GB or more is used when present and the
 CPU (8 threads) otherwise, RapidOCR (full-page on rasterized pages, pdf-aware
@@ -553,6 +554,7 @@ PAGE_VARIANTS = [
 # Below this share of numeric tokens agreeing between the two best readings,
 # the conflicting numbers are recorded rather than discarded.
 NUMERIC_AGREEMENT_KEEP = 0.98
+CONTENT_AGREEMENT = 0.98      # text agreement above which readings are the same
 SWITCH_MARGIN = 0.02
 MIN_PAGE_CHARS = 50       # below this a page produced essentially nothing
 MIN_ALNUM_RATIO = 0.35    # below this the "text" is not made of characters
@@ -581,7 +583,12 @@ def page_quality(result) -> dict:
             "score": round(n * alnum, 1)}
 
 
-NUMERIC_TOKEN = re.compile(r"[<>]?\s*-?\d+(?:[.,]\d+)?")
+# Numbers as a laboratory writes them: a detection-limit prefix, a sign,
+# thousands separators, a bare decimal, or scientific notation. A regex that
+# stops at "-?\d+(\.\d+)?" reads "1,234.56" as two numbers and "1.2E-05" as
+# one and a half, which is worse than not comparing them at all.
+NUMERIC_TOKEN = re.compile(
+    r"[<>]?\s*[+-]?(?:\d{1,3}(?:,\d{3})+|\d+|(?=[.,]\d))(?:[.,]\d+)?(?:[eE][+-]?\d+)?")
 QUALITY_SCHEMA = 1   # meaning of the quality scores, not just their shape
 DOUBT_SCHEMA = 1     # meaning of the doubt codes
 
@@ -602,28 +609,50 @@ def numeric_tokens(text: str) -> collections.Counter:
     return collections.Counter(re.sub(r"\s+", "", t) for t in NUMERIC_TOKEN.findall(text))
 
 
-def agreement(a: str, b: str) -> dict:
-    """How far two readings of the same page actually agree.
+def agreement(winner: str, others: dict) -> dict:
+    """How far the kept reading agrees with every other reading of the page.
 
     The yield score says how much was produced, not whether two variants
     produced the same thing: equal amounts of different text score the same.
-    This compares the content instead, and separately compares the numbers,
-    because for this corpus the numbers are the point. A page where the
-    variants agree on prose and disagree on a detection limit is not a page
-    where the variants agree.
+    This compares content, and compares the numbers separately, because for
+    this corpus the numbers are the point.
+
+    Every variant is compared, not just the runner-up by yield. A variant that
+    produced less text can still be the only one that read a detection limit
+    differently, and a disagreement about "<0.010" matters whoever raised it.
+
+    Conflicts keep their counts. "0.010 appears four times here and three
+    times there" is a different situation from one reading inventing a value,
+    and a set of distinct tokens cannot tell them apart.
     """
-    ta, tb = collections.Counter(a.split()), collections.Counter(b.split())
-    shared = sum((ta & tb).values())
-    total = max(sum(ta.values()), sum(tb.values()))
-    na, nb = numeric_tokens(a), numeric_tokens(b)
-    nshared = sum((na & nb).values())
-    ntotal = max(sum(na.values()), sum(nb.values()))
+    wt, wn = collections.Counter(winner.split()), numeric_tokens(winner)
+    per_variant, conflicts = {}, {}
+    for name, text in others.items():
+        ot, on = collections.Counter(text.split()), numeric_tokens(text)
+        shared = sum((wt & ot).values())
+        total = max(sum(wt.values()), sum(ot.values()))
+        nshared = sum((wn & on).values())
+        ntotal = max(sum(wn.values()), sum(on.values()))
+        per_variant[name] = {
+            "text": round(shared / total, 4) if total else 1.0,
+            "numeric": round(nshared / ntotal, 4) if ntotal else 1.0,
+        }
+        for token in set(wn) | set(on):
+            if wn[token] == on[token]:
+                continue
+            entry = conflicts.setdefault(token, {"token": token,
+                                                 "winner_count": wn[token],
+                                                 "other_counts": {}})
+            entry["other_counts"][name] = on[token]
+    scores = list(per_variant.values()) or [{"text": 1.0, "numeric": 1.0}]
     return {
-        "text": round(shared / total, 4) if total else 1.0,
-        "numeric": round(nshared / ntotal, 4) if ntotal else 1.0,
-        "numeric_tokens": ntotal,
-        "numeric_only_in_winner": sorted((na - nb))[:20],
-        "numeric_only_in_other": sorted((nb - na))[:20],
+        "compared_against": sorted(per_variant),
+        "text_min": min(v["text"] for v in scores),
+        "numeric_min": min(v["numeric"] for v in scores),
+        "per_variant": per_variant,
+        "numeric_conflicts": sorted(conflicts.values(),
+                                    key=lambda c: -abs(c["winner_count"]
+                                                       - min(c["other_counts"].values())))[:40],
     }
 
 
@@ -678,6 +707,15 @@ LOW_YIELD_FRACTION = 0.3  # a page under this share of the document's median
                           # yield is thin enough to be worth revisiting
 
 
+def _content_agrees(report: dict) -> bool | None:
+    """Whether every other reading of the page found the same text and numbers."""
+    a = report.get("variant_agreement") or {}
+    if not a:
+        return None
+    return (a.get("text_min", 0.0) >= CONTENT_AGREEMENT
+            and a.get("numeric_min", 0.0) >= NUMERIC_AGREEMENT_KEEP)
+
+
 def peer_median(row: dict, rows: list[dict]) -> float:
     """Median yield of pages shaped like this one.
 
@@ -686,7 +724,8 @@ def peer_median(row: dict, rows: list[dict]) -> float:
     they contain -- table, picture, both, neither -- which is already recorded,
     so no classifier and nothing to train.
     """
-    peers = [r["chars"] or 0 for r in rows if r.get("shape") == row.get("shape")]
+    peers = [r["chars"] or 0 for r in rows
+             if r.get("extracted_shape") == row.get("extracted_shape")]
     return _median(peers) if peers else 0.0
 
 
@@ -724,15 +763,20 @@ def page_report(report: dict) -> dict:
         "chars": q.get("chars"),
         "alnum_ratio": q.get("alnum_ratio"),
         "seconds": report.get("elapsed_seconds"),
-        "shape": report.get("shape"),
+        "extracted_shape": report.get("extracted_shape"),
         "variant_spread": spread,
         # Yield spread says the variants produced similar amounts; these say
         # they found the same text and the same numbers. Different questions.
-        "text_agreement": (report.get("variant_agreement") or {}).get("text"),
-        "numeric_agreement": (report.get("variant_agreement") or {}).get("numeric"),
+        "text_agreement": (report.get("variant_agreement") or {}).get("text_min"),
+        "numeric_agreement": (report.get("variant_agreement") or {}).get("numeric_min"),
         "win_margin": margin,
         "variant_scores": {k: round(v, 1) for k, v in scores.items()},
-        "variants_agree": spread <= AGREEMENT_SPREAD,
+        # Two separate claims, previously conflated under one name. The first
+        # says the variants produced similar amounts, the second says they read
+        # the same text and the same numbers -- which is the one that matters
+        # and the one the old field did not measure.
+        "variant_yields_agree": spread <= AGREEMENT_SPREAD,
+        "variants_content_agree": _content_agrees(report),
         "doubts": doubts_for(report, q, spread),
     }
     if report.get("table_mode") and report["table_mode"] != TABLE_MODE:
@@ -776,13 +820,12 @@ def doubts_for(report: dict, quality: dict, spread: float) -> list[dict]:
         out.append({"code": "table_grid_disputed",
                     "observed": {"shapes": alt.get("shapes")}, "policy": {}})
     agree = report.get("variant_agreement") or {}
-    if agree and agree.get("numeric", 1.0) < NUMERIC_AGREEMENT_KEEP:
+    if agree and agree.get("numeric_min", 1.0) < NUMERIC_AGREEMENT_KEEP:
         out.append({"code": "variants_disagree_on_numbers",
-                    "observed": {"numeric_agreement": agree.get("numeric"),
-                                 "text_agreement": agree.get("text"),
-                                 "against": agree.get("against"),
-                                 "only_in_winner": agree.get("numeric_only_in_winner"),
-                                 "only_in_other": agree.get("numeric_only_in_other")},
+                    "observed": {"numeric_agreement": agree.get("numeric_min"),
+                                 "text_agreement": agree.get("text_min"),
+                                 "compared_against": agree.get("compared_against"),
+                                 "conflicts": agree.get("numeric_conflicts")},
                     "policy": {"numeric_agreement_below": NUMERIC_AGREEMENT_KEEP}})
     if report.get("retried"):
         out.append({"code": "needed_retry",
@@ -1259,7 +1302,8 @@ def run_id(signature: dict) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()[:8]
 
 
-def cleanup_runs(root: Path = Path("output")) -> None:
+def cleanup_runs(root: Path = Path("output"), apply: bool = False,
+                 keep: str | None = None) -> None:
     """Keep each document's newest finished run and delete the older ones.
 
     Runs accumulate one directory per set of settings, which is the point while
@@ -1270,14 +1314,26 @@ def cleanup_runs(root: Path = Path("output")) -> None:
     A run without a finished document is left alone. It is either in progress
     or was interrupted, and deleting a directory out from under a running
     conversion is a mistake this project has already made once.
+
+    Reports what it would remove and removes nothing unless --apply is given.
+    The extraction being deleted is the one a comparison was run against, and
+    keeping the script is not the same as keeping the output, so the default
+    is to say what would go rather than to go.
     """
+    if not root.exists():
+        log(f"cleanup: no {root} directory")
+        return
     removed = kept = skipped = 0
     for doc_dir in sorted(d for d in root.iterdir() if d.is_dir()):
         doc_id = doc_dir.name
         finished, unfinished = [], []
         for run_dir in sorted(d for d in doc_dir.iterdir() if d.is_dir()):
             meta = run_dir / f"{doc_id}.docling.meta.json"
-            if not meta.exists():
+            document = [run_dir / f"{doc_id}.docling.json.gz",
+                        run_dir / f"{doc_id}.docling.json"]
+            # Finished means both the meta and the document it describes; a
+            # meta on its own is a run that died between the two writes.
+            if not meta.exists() or not any(d.exists() for d in document):
                 unfinished.append(run_dir)
                 continue
             try:
@@ -1292,16 +1348,26 @@ def cleanup_runs(root: Path = Path("output")) -> None:
             kept += len(finished)
             continue
         finished.sort()
-        newest = finished[-1][1]
-        for _, run_dir in finished[:-1]:
-            shutil.rmtree(run_dir)
-            log(f"{doc_id}: removed {run_dir.name}")
+        pinned = [r for _, r in finished if r.name == keep]
+        newest = pinned[0] if pinned else finished[-1][1]
+        if keep and not pinned:
+            log(f"{doc_id}: run {keep} not here; keeping {newest.name} instead")
+        for _, run_dir in finished:
+            if run_dir == newest:
+                continue
+            if apply:
+                shutil.rmtree(run_dir)
+            log(f"{doc_id}: {'removed' if apply else 'would remove'} {run_dir}")
             removed += 1
         kept += 1
-        log(f"{doc_id}: kept {newest.name}")
-        rebuild_runs(doc_dir, doc_id)
-    log(f"cleanup: {removed} run(s) removed, {kept} kept, "
+        log(f"{doc_id}: keeping {newest}")
+        if apply:
+            rebuild_runs(doc_dir, doc_id)
+    verb = "removed" if apply else "would be removed"
+    log(f"cleanup: {removed} run(s) {verb}, {kept} kept, "
         f"{skipped} unfinished left alone; runs/ untouched")
+    if removed and not apply:
+        log("cleanup: nothing deleted. Re-run with --apply to delete.")
 
 
 def rebuild_runs(doc_root: Path, doc_id: str) -> None:
@@ -1362,7 +1428,8 @@ def main() -> None:
     flags = [a for a in sys.argv[1:] if a.startswith("-")]
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     if "--cleanup" in flags:
-        cleanup_runs()
+        keep = next((f.split("=", 1)[1] for f in flags if f.startswith("--keep-run=")), None)
+        cleanup_runs(apply="--apply" in flags, keep=keep)
         return
     source = args[0] if args else ""
     if not source or source in ("-h", "--help"):
@@ -1440,14 +1507,17 @@ def main() -> None:
         for model in models
         for tname, tmode in (("fast", _TFMode.FAST), ("accurate", _TFMode.ACCURATE))
     }
-    t0 = time.time()
+    # Durations come from a monotonic clock. time.time() can step backwards
+    # when the system clock is adjusted, which shows up as a page that took
+    # negative seconds; wall clock is for ingested_at and nothing else.
+    t0 = time.perf_counter()
     for i, (start, end) in enumerate(ranges, 1):
         json_out = chunks / f"pg-{start:04d}-{end:04d}.docling.json"
         warn_out = chunks / f"pg-{start:04d}-{end:04d}.warnings.json"
         if json_out.exists():
             log(f"{i}/{len(ranges)} pages {start}-{end}: already done")
             continue
-        t1 = time.time()
+        t1 = time.perf_counter()
         # Staging is not guessed at, it is decided by result. Every variant in
         # PAGE_VARIANTS is run and the best output kept, scored by how many
         # characters were produced weighted by the share that are letters or
@@ -1501,27 +1571,21 @@ def main() -> None:
 
         staging_scores = {a["variant"]["name"]: a["quality"] for a in attempts}
 
-        # Agreement between the winner and the next best, on content rather
-        # than on how much was produced. Kept separately from the yield score
-        # because they answer different questions: one says a page produced
-        # text, the other says two ways of reading it found the same text.
-        runner_up = None
-        for a in attempts:
-            if a is best:
-                continue
-            if runner_up is None or a["quality"]["score"] > runner_up["quality"]["score"]:
-                runner_up = a
-        variant_agreement = None
-        if runner_up is not None:
-            variant_agreement = agreement(page_text(best["result"]),
-                                          page_text(runner_up["result"]))
-            variant_agreement["against"] = runner_up["variant"]["name"]
-            # Conflicting numbers are kept; conflicting prose is not. A page
-            # read two ways that disagree on a measurement is worth looking
-            # at, and the tokens are the whole of what needs looking at.
-            if variant_agreement["numeric"] >= NUMERIC_AGREEMENT_KEEP:
-                variant_agreement.pop("numeric_only_in_winner", None)
-                variant_agreement.pop("numeric_only_in_other", None)
+        # Agreement between the kept reading and every other reading, on
+        # content rather than on how much was produced.
+        # Only readings that produced something are worth disagreeing with. A
+        # variant that came back empty or as mojibake has already been judged
+        # broken; counting it as a dissenting opinion would mark every rescued
+        # page as disputed, which is the opposite of informative.
+        others = {a["variant"]["name"]: page_text(a["result"])
+                  for a in attempts
+                  if a is not best and not looks_broken(a["quality"])}
+        variant_agreement = agreement(page_text(best["result"]), others) if others else None
+        if variant_agreement and variant_agreement["numeric_min"] >= NUMERIC_AGREEMENT_KEEP:
+            # The numbers all match; the token-by-token detail is only worth
+            # keeping when they do not.
+            variant_agreement.pop("numeric_conflicts", None)
+
         restaged = None
         if len(attempts) > 1 and staging_used != variants[0]["name"]:
             firstq = staging_scores.get(variants[0]["name"], {})
@@ -1592,9 +1656,11 @@ def main() -> None:
             "rasterized_pages": n_raster,
             "table_mode": table_mode_used,
             "staging": staging_used,
-            # What this page contains, used to compare it against pages like it
-            # rather than against the whole document.
-            "shape": ("table+picture" if result.document.tables and result.document.pictures
+            # What the extraction produced, used to compare a page against pages
+            # that came out like it. Not the page's true type: a table that was
+            # missed leaves a page looking like prose, which is exactly the
+            # page most in need of a second look.
+            "extracted_shape": ("table+picture" if result.document.tables and result.document.pictures
                       else "table" if result.document.tables
                       else "picture" if result.document.pictures
                       else "text"),
@@ -1606,7 +1672,7 @@ def main() -> None:
             "retried": retries,
             "table_mode_alternate": alternate,
             "confidence": confidence_scores(result),
-            "elapsed_seconds": round(time.time() - t1, 1),
+            "elapsed_seconds": round(time.perf_counter() - t1, 1),
             "warnings": cap.records,
             "warnings_over_cap": cap.dropped,
             "errors": result_errors(result),
@@ -1614,7 +1680,7 @@ def main() -> None:
         n_warn = len(cap.records) + len(result_errors(result))
         del result
         gc.collect()  # drop this chunk's document before starting the next
-        log(f"{i}/{len(ranges)} pages {start}-{end}: {time.time() - t1:.0f}s"
+        log(f"{i}/{len(ranges)} pages {start}-{end}: {time.perf_counter() - t1:.0f}s"
             + (f", {n_warn} warning(s)" if n_warn else ""))
 
     # Merge the chunks into one document, then drop the per-chunk files.
@@ -1757,7 +1823,7 @@ def main() -> None:
                 # document: a cover, a separator and a drawing are thin next to
                 # a page of tables without anything being wrong with them.
                 "observed": {"chars": row["chars"], "peer_median": peer,
-                             "peer_group": row.get("shape")},
+                             "peer_group": row.get("extracted_shape")},
                 "policy": {"fraction_of_peer_median": LOW_YIELD_FRACTION},
             }]
     doubt_index: dict = {}
@@ -1798,7 +1864,7 @@ def main() -> None:
         "components": component_versions(),
         "ocr_models": ocr_model_files(),
         "ingested_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-        "elapsed_seconds": round(time.time() - t0, 1),
+        "elapsed_seconds": round(time.perf_counter() - t0, 1),
         # docling's own view of how well each page went. Unlike the warnings,
         # this covers every page, including ones that failed without saying so.
         "confidence_mean": {k: round(sum(v) / len(v), 4)
@@ -1817,7 +1883,9 @@ def main() -> None:
         "reprocess_pages": len(reprocess),
         "quality": {
             "pages": len(pages_report),
-            "variants_agree": sum(1 for r in pages_report if r["variants_agree"]),
+            "variant_yields_agree": sum(1 for r in pages_report if r["variant_yields_agree"]),
+        "variants_content_agree": sum(1 for r in pages_report
+                                      if r["variants_content_agree"]),
             "median_chars": _median([r["chars"] or 0 for r in pages_report]),
             "median_alnum_ratio": _median([r["alnum_ratio"] or 0 for r in pages_report]),
         },
@@ -1894,7 +1962,7 @@ def main() -> None:
     # is readable without opening two documents. Rebuilt from the directories
     # present, so it is always a description of what is actually on disk.
     rebuild_runs(doc_root, doc_id)
-    log(f"INGESTED {doc_id}: {len(ranges)} chunks in {time.time() - t0:.0f}s -> {out}")
+    log(f"INGESTED {doc_id}: {len(ranges)} chunks in {time.perf_counter() - t0:.0f}s -> {out}")
 
 
 if __name__ == "__main__":
