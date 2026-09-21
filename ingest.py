@@ -589,8 +589,8 @@ def page_quality(result) -> dict:
 # one and a half, which is worse than not comparing them at all.
 NUMERIC_TOKEN = re.compile(
     r"[<>]?\s*[+-]?(?:\d{1,3}(?:,\d{3})+|\d+|(?=[.,]\d))(?:[.,]\d+)?(?:[eE][+-]?\d+)?")
-QUALITY_SCHEMA = 1   # meaning of the quality scores, not just their shape
-DOUBT_SCHEMA = 1     # meaning of the doubt codes
+QUALITY_SCHEMA = 2   # meaning of the quality scores, not just their shape
+DOUBT_SCHEMA = 2     # meaning of the doubt codes
 
 
 def page_text(result) -> str:
@@ -642,17 +642,42 @@ def agreement(winner: str, others: dict) -> dict:
                 continue
             entry = conflicts.setdefault(token, {"token": token,
                                                  "winner_count": wn[token],
-                                                 "other_counts": {}})
+                                                 "other_counts": {}, "kind": None})
             entry["other_counts"][name] = on[token]
+            # A value one reading has and another does not is a different
+            # matter from the same value counted a different number of times.
+            # The first can be a misread measurement; the second is usually a
+            # repeated header or a row read twice.
+            kind = "token_difference" if 0 in (wn[token], on[token]) else "count_difference"
+            if entry["kind"] != "token_difference":
+                entry["kind"] = kind
     scores = list(per_variant.values()) or [{"text": 1.0, "numeric": 1.0}]
+    ordered = sorted(conflicts.values(),
+                     key=lambda c: (c["kind"] != "token_difference",
+                                    -abs(c["winner_count"] - min(c["other_counts"].values()))))
+    token_diffs = [c for c in ordered if c["kind"] == "token_difference"]
+    text_min = min(v["text"] for v in scores)
+    numeric_min = min(v["numeric"] for v in scores)
+    # One value in two hundred is 0.995, and that one value may be the
+    # measurement. Conflicts are kept whenever there are any; the ratio is a
+    # completeness measure, not a licence to discard the detail.
+    if token_diffs:
+        verdict = "numbers_differ"
+    elif text_min < CONTENT_AGREEMENT:
+        verdict = "text_differs_numbers_agree"
+    else:
+        verdict = "agree"
     return {
         "compared_against": sorted(per_variant),
-        "text_min": min(v["text"] for v in scores),
-        "numeric_min": min(v["numeric"] for v in scores),
+        "text_min": text_min,
+        "numeric_min": numeric_min,
+        "numeric_exact_agree": not conflicts,
+        "numeric_token_differences": len(token_diffs),
+        "numeric_count_differences": len(ordered) - len(token_diffs),
+        "verdict": verdict,
         "per_variant": per_variant,
-        "numeric_conflicts": sorted(conflicts.values(),
-                                    key=lambda c: -abs(c["winner_count"]
-                                                       - min(c["other_counts"].values())))[:40],
+        "numeric_conflicts": ordered[:40],
+        "numeric_conflicts_truncated": max(0, len(ordered) - 40),
     }
 
 
@@ -705,15 +730,6 @@ def convert_staged(pdf: Path, start: int, end: int, raster: bool,
 AGREEMENT_SPREAD = 0.05   # variants within this of each other agree
 LOW_YIELD_FRACTION = 0.3  # a page under this share of the document's median
                           # yield is thin enough to be worth revisiting
-
-
-def _content_agrees(report: dict) -> bool | None:
-    """Whether every other reading of the page found the same text and numbers."""
-    a = report.get("variant_agreement") or {}
-    if not a:
-        return None
-    return (a.get("text_min", 0.0) >= CONTENT_AGREEMENT
-            and a.get("numeric_min", 0.0) >= NUMERIC_AGREEMENT_KEEP)
 
 
 def peer_median(row: dict, rows: list[dict]) -> float:
@@ -776,7 +792,8 @@ def page_report(report: dict) -> dict:
         # the same text and the same numbers -- which is the one that matters
         # and the one the old field did not measure.
         "variant_yields_agree": spread <= AGREEMENT_SPREAD,
-        "variants_content_agree": _content_agrees(report),
+        "agreement": (report.get("variant_agreement") or {}).get("verdict"),
+        "numeric_exact_agree": (report.get("variant_agreement") or {}).get("numeric_exact_agree"),
         "doubts": doubts_for(report, q, spread),
     }
     if report.get("table_mode") and report["table_mode"] != TABLE_MODE:
@@ -820,13 +837,16 @@ def doubts_for(report: dict, quality: dict, spread: float) -> list[dict]:
         out.append({"code": "table_grid_disputed",
                     "observed": {"shapes": alt.get("shapes")}, "policy": {}})
     agree = report.get("variant_agreement") or {}
-    if agree and agree.get("numeric_min", 1.0) < NUMERIC_AGREEMENT_KEEP:
+    if agree and agree.get("verdict") == "numbers_differ":
         out.append({"code": "variants_disagree_on_numbers",
                     "observed": {"numeric_agreement": agree.get("numeric_min"),
                                  "text_agreement": agree.get("text_min"),
+                                 "token_differences": agree.get("numeric_token_differences"),
+                                 "count_differences": agree.get("numeric_count_differences"),
                                  "compared_against": agree.get("compared_against"),
-                                 "conflicts": agree.get("numeric_conflicts")},
-                    "policy": {"numeric_agreement_below": NUMERIC_AGREEMENT_KEEP}})
+                                 "conflicts": [c for c in (agree.get("numeric_conflicts") or [])
+                                               if c["kind"] == "token_difference"][:20]},
+                    "policy": {"flag_on": "any numeric token in one reading and not another"}})
     if report.get("retried"):
         out.append({"code": "needed_retry",
                     "observed": {"first_attempt": report.get("retried")}, "policy": {}})
@@ -1137,7 +1157,7 @@ def verify_regdocs_url(doc_id: str, given: str | None) -> dict:
                 "source_url_check_error": str(exc)}
 
 
-META_SCHEMA = 1   # bumped when the shape of the meta changes
+META_SCHEMA = 2   # bumped when the shape of the meta changes
 # The document JSON is mostly repeated field names and coordinates and gzips to
 # about a tenth of its size; the PDF beside it is already compressed and gains
 # nothing from it. The meta stays plain text -- it is the file people open, and
@@ -1581,10 +1601,21 @@ def main() -> None:
                   for a in attempts
                   if a is not best and not looks_broken(a["quality"])}
         variant_agreement = agreement(page_text(best["result"]), others) if others else None
-        if variant_agreement and variant_agreement["numeric_min"] >= NUMERIC_AGREEMENT_KEEP:
-            # The numbers all match; the token-by-token detail is only worth
-            # keeping when they do not.
-            variant_agreement.pop("numeric_conflicts", None)
+        if variant_agreement is not None:
+            # Which readings were left out of that comparison and why, so
+            # "all credible readings agreed" can be checked rather than taken
+            # on trust -- four variants ran, one was rejected as broken.
+            variant_agreement["excluded"] = {
+                a["variant"]["name"]: {
+                    "chars": a["quality"]["chars"],
+                    "alnum_ratio": a["quality"]["alnum_ratio"],
+                    "reason": ("almost_no_text"
+                               if a["quality"]["chars"] < MIN_PAGE_CHARS
+                               else "not_character_like"),
+                }
+                for a in attempts
+                if a is not best and looks_broken(a["quality"])
+            }
 
         restaged = None
         if len(attempts) > 1 and staging_used != variants[0]["name"]:
@@ -1884,8 +1915,11 @@ def main() -> None:
         "quality": {
             "pages": len(pages_report),
             "variant_yields_agree": sum(1 for r in pages_report if r["variant_yields_agree"]),
-        "variants_content_agree": sum(1 for r in pages_report
-                                      if r["variants_content_agree"]),
+        # Three states, because "the readings differ" and "the selected
+        # extraction is bad" are not the same claim. Whitespace and repeated
+        # headers move the text score without putting a measurement in doubt.
+        "agreement": {v: sum(1 for r in pages_report if r["agreement"] == v)
+                      for v in ("agree", "text_differs_numbers_agree", "numbers_differ")},
             "median_chars": _median([r["chars"] or 0 for r in pages_report]),
             "median_alnum_ratio": _median([r["alnum_ratio"] or 0 for r in pages_report]),
         },
