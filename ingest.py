@@ -63,6 +63,7 @@ when it is needed (doc.export_to_markdown()).
 
 from __future__ import annotations
 
+import collections
 import datetime as _dt
 import gc
 import gzip
@@ -114,8 +115,21 @@ WARNING_KINDS = (
 )
 
 
+_log_file = None
+
+
 def log(msg: str) -> None:
-    print(f"[ingest] {msg}", flush=True)
+    line = f"[ingest] {msg}"
+    print(line, flush=True)
+    # Also beside the document's own output once there is somewhere to put it.
+    # A run that dies before the merge writes no meta at all, and then this is
+    # the only record of how far it got.
+    if _log_file is not None:
+        try:
+            with open(_log_file, "a", encoding="utf-8") as fh:
+                fh.write(f"{_dt.datetime.now(_dt.timezone.utc).isoformat()} {line}\n")
+        except Exception:
+            pass
 
 
 def pick_device() -> str:
@@ -530,6 +544,9 @@ PAGE_VARIANTS = [
 # argmax would swap exact embedded text for an OCR pass scoring 0.4% higher
 # and lose a little accuracy. Calibrated over 24 pages from three filings --
 # never switching scored 98.0%, pure argmax 98.5%, a 1-3% margin 98.55%.
+# Below this share of numeric tokens agreeing between the two best readings,
+# the conflicting numbers are recorded rather than discarded.
+NUMERIC_AGREEMENT_KEEP = 0.98
 SWITCH_MARGIN = 0.02
 MIN_PAGE_CHARS = 50       # below this a page produced essentially nothing
 MIN_ALNUM_RATIO = 0.35    # below this the "text" is not made of characters
@@ -556,6 +573,52 @@ def page_quality(result) -> dict:
     alnum = sum(1 for ch in text if ch.isalnum()) / n
     return {"chars": n, "alnum_ratio": round(alnum, 4),
             "score": round(n * alnum, 1)}
+
+
+NUMERIC_TOKEN = re.compile(r"[<>]?\s*-?\d+(?:[.,]\d+)?")
+QUALITY_SCHEMA = 1   # meaning of the quality scores, not just their shape
+DOUBT_SCHEMA = 1     # meaning of the doubt codes
+
+
+def page_text(result) -> str:
+    """Everything the conversion produced for a page, as one string."""
+    parts = [item.text or "" for item in result.document.texts]
+    parts += [c.text or "" for t in result.document.tables for c in t.data.table_cells]
+    return " ".join(parts)
+
+
+def numeric_tokens(text: str) -> collections.Counter:
+    """Numbers as written, keeping any < or > in front of them.
+
+    "<0.010" and "0.010" are different claims -- a detection limit against a
+    measurement -- so the prefix is part of the token, not noise to strip.
+    """
+    return collections.Counter(re.sub(r"\s+", "", t) for t in NUMERIC_TOKEN.findall(text))
+
+
+def agreement(a: str, b: str) -> dict:
+    """How far two readings of the same page actually agree.
+
+    The yield score says how much was produced, not whether two variants
+    produced the same thing: equal amounts of different text score the same.
+    This compares the content instead, and separately compares the numbers,
+    because for this corpus the numbers are the point. A page where the
+    variants agree on prose and disagree on a detection limit is not a page
+    where the variants agree.
+    """
+    ta, tb = collections.Counter(a.split()), collections.Counter(b.split())
+    shared = sum((ta & tb).values())
+    total = max(sum(ta.values()), sum(tb.values()))
+    na, nb = numeric_tokens(a), numeric_tokens(b)
+    nshared = sum((na & nb).values())
+    ntotal = max(sum(na.values()), sum(nb.values()))
+    return {
+        "text": round(shared / total, 4) if total else 1.0,
+        "numeric": round(nshared / ntotal, 4) if ntotal else 1.0,
+        "numeric_tokens": ntotal,
+        "numeric_only_in_winner": sorted((na - nb))[:20],
+        "numeric_only_in_other": sorted((nb - na))[:20],
+    }
 
 
 def looks_broken(quality: dict) -> bool:
@@ -609,6 +672,18 @@ LOW_YIELD_FRACTION = 0.3  # a page under this share of the document's median
                           # yield is thin enough to be worth revisiting
 
 
+def peer_median(row: dict, rows: list[dict]) -> float:
+    """Median yield of pages shaped like this one.
+
+    Comparing every page to the document median flags covers, separators and
+    drawings as thin when nothing is wrong with them. Pages are grouped by what
+    they contain -- table, picture, both, neither -- which is already recorded,
+    so no classifier and nothing to train.
+    """
+    peers = [r["chars"] or 0 for r in rows if r.get("shape") == row.get("shape")]
+    return _median(peers) if peers else 0.0
+
+
 def page_report(report: dict) -> dict:
     """One row per page, for every page, whether or not anything went wrong.
 
@@ -643,7 +718,12 @@ def page_report(report: dict) -> dict:
         "chars": q.get("chars"),
         "alnum_ratio": q.get("alnum_ratio"),
         "seconds": report.get("elapsed_seconds"),
+        "shape": report.get("shape"),
         "variant_spread": spread,
+        # Yield spread says the variants produced similar amounts; these say
+        # they found the same text and the same numbers. Different questions.
+        "text_agreement": (report.get("variant_agreement") or {}).get("text"),
+        "numeric_agreement": (report.get("variant_agreement") or {}).get("numeric"),
         "win_margin": margin,
         "variant_scores": {k: round(v, 1) for k, v in scores.items()},
         "variants_agree": spread <= AGREEMENT_SPREAD,
@@ -654,7 +734,7 @@ def page_report(report: dict) -> dict:
     return row
 
 
-def doubts_for(report: dict, quality: dict, spread: float) -> list[str]:
+def doubts_for(report: dict, quality: dict, spread: float) -> list[dict]:
     """Named, machine-readable reasons a page may not be fully extracted.
 
     These are the handles a later re-run needs: not "something was odd" but
@@ -663,9 +743,13 @@ def doubts_for(report: dict, quality: dict, spread: float) -> list[str]:
     """
     out = []
     if (quality.get("chars") or 0) < MIN_PAGE_CHARS:
-        out.append("almost_no_text")
+        out.append({"code": "almost_no_text",
+                    "observed": {"chars": quality.get("chars")},
+                    "policy": {"min_page_chars": MIN_PAGE_CHARS}})
     if (quality.get("alnum_ratio") or 1.0) < MIN_ALNUM_RATIO:
-        out.append("not_character_like")
+        out.append({"code": "not_character_like",
+                    "observed": {"alnum_ratio": quality.get("alnum_ratio")},
+                    "policy": {"min_alnum_ratio": MIN_ALNUM_RATIO}})
     # Variant disagreement alone is not a doubt. A page rescued from a broken
     # text layer disagrees enormously and is then fine; flagging those would
     # fill the queue with pages that came out well. The spread is kept on the
@@ -674,15 +758,35 @@ def doubts_for(report: dict, quality: dict, spread: float) -> list[str]:
     for w in report.get("warnings", []) + report.get("errors", []):
         kind = w.get("kind")
         if kind == "table_cells_dropped" and (w.get("drop_ratio") or 0) > 0.5:
-            out.append("table_mostly_dropped")
+            out.append({"code": "table_mostly_dropped",
+                        "observed": {"dropped": w.get("cells_dropped"),
+                                     "total": w.get("cells_total"),
+                                     "drop_ratio": w.get("drop_ratio")},
+                        "policy": {"drop_ratio_above": 0.5}})
         elif kind in ("ocr_empty", "bbox_clamped", "timeout"):
-            out.append(kind)
+            out.append({"code": kind, "observed": {}, "policy": {}})
     alt = report.get("table_mode_alternate") or {}
     if alt.get("shapes_agree") is False:
-        out.append("table_grid_disputed")
+        out.append({"code": "table_grid_disputed",
+                    "observed": {"shapes": alt.get("shapes")}, "policy": {}})
+    agree = report.get("variant_agreement") or {}
+    if agree and agree.get("numeric", 1.0) < NUMERIC_AGREEMENT_KEEP:
+        out.append({"code": "variants_disagree_on_numbers",
+                    "observed": {"numeric_agreement": agree.get("numeric"),
+                                 "text_agreement": agree.get("text"),
+                                 "against": agree.get("against"),
+                                 "only_in_winner": agree.get("numeric_only_in_winner"),
+                                 "only_in_other": agree.get("numeric_only_in_other")},
+                    "policy": {"numeric_agreement_below": NUMERIC_AGREEMENT_KEEP}})
     if report.get("retried"):
-        out.append("needed_retry")
-    return sorted(set(out))
+        out.append({"code": "needed_retry",
+                    "observed": {"first_attempt": report.get("retried")}, "policy": {}})
+    seen, unique = set(), []
+    for d in out:
+        if d["code"] not in seen:
+            seen.add(d["code"])
+            unique.append(d)
+    return unique
 
 
 def _median(values: list) -> float:
@@ -756,7 +860,9 @@ def ocr_model_files() -> dict:
         import rapidocr
 
         models = Path(rapidocr.__file__).parent / "models"
-        return {f.name: f.stat().st_size for f in sorted(models.glob("*.pth"))}
+        return {f.name: {"bytes": f.stat().st_size,
+                         "sha256": hashlib.sha256(f.read_bytes()).hexdigest()}
+                for f in sorted(models.glob("*.pth"))}
     except Exception as exc:
         return {"error": f"could not read model dir: {exc}"}
 
@@ -1129,6 +1235,8 @@ def run_signature() -> dict:
         "table_mode": TABLE_MODE,
         "table_mode_fallback": True,
         "ocr_model_type": "medium",
+        "quality_schema": QUALITY_SCHEMA,
+        "doubt_schema": DOUBT_SCHEMA,
     }
 
 
@@ -1223,6 +1331,8 @@ def main() -> None:
         log(f"{doc_id}: delete {out} to redo it")
         rebuild_runs(doc_root, doc_id)
         return
+    global _log_file
+    _log_file = out / "ingest.log"
     log(f"{doc_id}: run {rid}")
     script_copy = keep_script(rid)
     total = len(pdfium.PdfDocument(str(pdf)))
@@ -1335,6 +1445,28 @@ def main() -> None:
                 path.unlink(missing_ok=True)
 
         staging_scores = {a["variant"]["name"]: a["quality"] for a in attempts}
+
+        # Agreement between the winner and the next best, on content rather
+        # than on how much was produced. Kept separately from the yield score
+        # because they answer different questions: one says a page produced
+        # text, the other says two ways of reading it found the same text.
+        runner_up = None
+        for a in attempts:
+            if a is best:
+                continue
+            if runner_up is None or a["quality"]["score"] > runner_up["quality"]["score"]:
+                runner_up = a
+        variant_agreement = None
+        if runner_up is not None:
+            variant_agreement = agreement(page_text(best["result"]),
+                                          page_text(runner_up["result"]))
+            variant_agreement["against"] = runner_up["variant"]["name"]
+            # Conflicting numbers are kept; conflicting prose is not. A page
+            # read two ways that disagree on a measurement is worth looking
+            # at, and the tokens are the whole of what needs looking at.
+            if variant_agreement["numeric"] >= NUMERIC_AGREEMENT_KEEP:
+                variant_agreement.pop("numeric_only_in_winner", None)
+                variant_agreement.pop("numeric_only_in_other", None)
         restaged = None
         if len(attempts) > 1 and staging_used != variants[0]["name"]:
             firstq = staging_scores.get(variants[0]["name"], {})
@@ -1344,6 +1476,7 @@ def main() -> None:
                 f"({firstq.get('chars', 0)} chars -> {quality['chars']})")
         for a in attempts:
             a.pop("result", None); a.pop("cap", None)
+
 
         # Neither table mode wins everywhere: fast rescues the large forms that
         # accurate collapses to a 1x1 grid, accurate keeps small two-column
@@ -1404,8 +1537,15 @@ def main() -> None:
             "rasterized_pages": n_raster,
             "table_mode": table_mode_used,
             "staging": staging_used,
+            # What this page contains, used to compare it against pages like it
+            # rather than against the whole document.
+            "shape": ("table+picture" if result.document.tables and result.document.pictures
+                      else "table" if result.document.tables
+                      else "picture" if result.document.pictures
+                      else "text"),
             "quality": quality,
             "staging_scores": staging_scores,
+            "variant_agreement": variant_agreement,
             "restaged": restaged,
             "figure_text": figure_words,
             "retried": retries,
@@ -1553,19 +1693,32 @@ def main() -> None:
     # dense tables and one of sparse cover letters have nothing in common in
     # absolute terms. Pages well under the document's own median yield are
     # worth revisiting even when nothing went visibly wrong.
-    median_chars = _median([r["chars"] or 0 for r in pages_report])
     for row in pages_report:
-        if median_chars and (row["chars"] or 0) < median_chars * LOW_YIELD_FRACTION:
-            row["doubts"] = sorted(set(row["doubts"] + ["thin_for_this_document"]))
+        peer = peer_median(row, pages_report)
+        if peer and (row["chars"] or 0) < peer * LOW_YIELD_FRACTION:
+            row["doubts"] = row["doubts"] + [{
+                "code": "thin_for_this_document",
+                # Judged against pages of the same shape rather than the whole
+                # document: a cover, a separator and a drawing are thin next to
+                # a page of tables without anything being wrong with them.
+                "observed": {"chars": row["chars"], "peer_median": peer,
+                             "peer_group": row.get("shape")},
+                "policy": {"fraction_of_peer_median": LOW_YIELD_FRACTION},
+            }]
     doubt_index: dict = {}
     for row in pages_report:
         for d in row["doubts"]:
-            doubt_index.setdefault(d, []).append(row["page"])
+            doubt_index.setdefault(d["code"], []).append(row["page"])
     reprocess = {pg for pages in doubt_index.values() for pg in pages}
 
     page_seconds = sorted(r["seconds"] for r in pages_report if r.get("seconds"))
     meta = {
         "meta_schema": META_SCHEMA,
+        # The shape of this file, and separately the meaning of the numbers in
+        # it. A better quality score would change what variant_spread: 0.04
+        # means without changing the shape of anything.
+        "quality_schema": QUALITY_SCHEMA,
+        "doubt_schema": DOUBT_SCHEMA,
         "doc_id": doc_id,
         "run_id": rid,
         "source": source,
@@ -1657,17 +1810,27 @@ def main() -> None:
         # Raised while concatenating and saving, so they belong to no chunk.
         "merge_warnings": merge_cap.records,
         "merge_warnings_over_cap": merge_cap.dropped,
+        # The configuration as fields rather than prose, so two runs can be
+        # compared by a machine and not only read.
         "settings": {
             "device": device,
             "threads": THREADS,
-            "ocr": "rapidocr-torch pp-ocrv6-medium, en, full_page on "
-                   "rasterized pages, pdf_aware_layout_regions on the rest",
-            "tables": f"tableformer-{TABLE_MODE} first, other mode when cells drop",
+            "ocr": {"engine": "rapidocr", "backend": "torch",
+                    "models": "pp-ocrv6", "model_type": "medium",
+                    "lang": ["en"],
+                    "mode_rasterized": "full_page",
+                    "mode_text_layer": "pdf_aware_layout_regions"},
+            "tables": {"mode": TABLE_MODE, "fallback": "other mode when cells drop",
+                       "engine": "tableformer"},
             "images_scale": 2.0,
-            "headings": "numbering (bookmarks unavailable after staging)",
-            "rasterized_pages": len(bad_pages),
-            "raster_scale": RASTER_SCALE,
-            "raster_policy": "pages whose text layer is unmapped glyph codes",
+            "headings": {"use_numbering": True, "use_bookmarks": False,
+                         "reason": "bookmarks do not survive page staging"},
+            "staging": {"rasterized_pages": len(bad_pages),
+                        "raster_scale": RASTER_SCALE,
+                        "unmapped_ratio": UNMAPPED_RATIO,
+                        "min_text_chars": MIN_TEXT_CHARS,
+                        "policy": "text layer of unmapped glyph codes, or none"},
+            "variants": [v["name"] for v in PAGE_VARIANTS],
         },
     }
     write_atomic(out / f"{doc_id}.docling.meta.json",
