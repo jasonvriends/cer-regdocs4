@@ -63,6 +63,32 @@ def operation(a: str, b: str) -> str | None:
 # A comparator lost turns a detection limit into a measurement; a magnitude
 # shift moves it by a factor of ten. Those two first, whatever the characters
 # did to get there.
+SEPARATOR = {",", "."}
+
+
+def magnitude_kind(a: str, b: str) -> str:
+    """Why two values differ in magnitude, which is not one situation.
+
+    A comma read as a period is a formatting difference and often not a number
+    at all -- "(Table 9.3)24,25" is two footnote markers. A separator that
+    appeared or vanished, or a digit that did, is a different matter. Keeping
+    them apart lets priority follow the cause instead of the ratio.
+    """
+    _, _, da = strip_num(a)
+    _, _, db = strip_num(b)
+    if len(da) == len(db):
+        diff = [i for i, (x, y) in enumerate(zip(da, db)) if x != y]
+        if len(diff) == 1 and {da[diff[0]], db[diff[0]]} <= SEPARATOR:
+            return "separator_substitution"
+    bare_a = da.replace(",", "").replace(".", "")
+    bare_b = db.replace(",", "").replace(".", "")
+    if bare_a == bare_b:
+        return "separator_moved"
+    if abs(len(bare_a) - len(bare_b)) >= 1:
+        return "digit_added_or_lost"
+    return "value_differs"
+
+
 PRIORITY = {"comparator_change": 0, "magnitude_shift": 1, "decimal_shift": 2,
             "exponent_change": 3, "sign_change": 4, "digit_substitution": 5,
             "digit_insertion": 6}
@@ -84,8 +110,11 @@ def page_candidates(agree: dict) -> list:
                 continue
             op = operation(w["token"], o["token"])
             if op:
-                out.append({"kept": o["token"], "other": w["token"],
-                            "operation": op, "variants": sorted(holders & lackers)})
+                entry = {"kept": o["token"], "other": w["token"],
+                         "operation": op, "variants": sorted(holders & lackers)}
+                if op == "magnitude_shift":
+                    entry["cause"] = magnitude_kind(o["token"], w["token"])
+                out.append(entry)
     out.sort(key=lambda c: PRIORITY[c["operation"]])
     return out
 
