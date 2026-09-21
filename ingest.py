@@ -589,8 +589,8 @@ def page_quality(result) -> dict:
 # one and a half, which is worse than not comparing them at all.
 NUMERIC_TOKEN = re.compile(
     r"[<>]?\s*[+-]?(?:\d{1,3}(?:,\d{3})+|\d+|(?=[.,]\d))(?:[.,]\d+)?(?:[eE][+-]?\d+)?")
-QUALITY_SCHEMA = 2   # meaning of the quality scores, not just their shape
-DOUBT_SCHEMA = 2     # meaning of the doubt codes
+QUALITY_SCHEMA = 3   # meaning of the quality scores, not just their shape
+DOUBT_SCHEMA = 3     # meaning of the doubt codes
 
 
 def page_text(result) -> str:
@@ -651,11 +651,28 @@ def agreement(winner: str, others: dict) -> dict:
             kind = "token_difference" if 0 in (wn[token], on[token]) else "count_difference"
             if entry["kind"] != "token_difference":
                 entry["kind"] = kind
+    # Which way each disagreement runs. A value the kept reading does not have
+    # may be content it missed; a value only it has is usually another reading
+    # under-reading the page. The two are recorded, never merged, and nothing
+    # is dropped for being a near-miss of another token -- "1.11" against
+    # "1.1" appears on both sides at once and is exactly the case that matters.
+    for c in conflicts.values():
+        if c["kind"] != "token_difference":
+            c["direction"] = None
+            continue
+        if c["winner_count"] == 0:
+            c["direction"] = "winner_missing"
+        elif all(v == 0 for v in c["other_counts"].values()):
+            c["direction"] = "others_missing"
+        else:
+            c["direction"] = "bidirectional"
+
     scores = list(per_variant.values()) or [{"text": 1.0, "numeric": 1.0}]
     ordered = sorted(conflicts.values(),
                      key=lambda c: (c["kind"] != "token_difference",
                                     -abs(c["winner_count"] - min(c["other_counts"].values()))))
     token_diffs = [c for c in ordered if c["kind"] == "token_difference"]
+    by_direction = collections.Counter(c["direction"] for c in token_diffs)
     text_min = min(v["text"] for v in scores)
     numeric_min = min(v["numeric"] for v in scores)
     # One value in two hundred is 0.995, and that one value may be the
@@ -674,6 +691,7 @@ def agreement(winner: str, others: dict) -> dict:
         "numeric_exact_agree": not conflicts,
         "numeric_token_differences": len(token_diffs),
         "numeric_count_differences": len(ordered) - len(token_diffs),
+        "numeric_directions": dict(by_direction),
         "verdict": verdict,
         "per_variant": per_variant,
         "numeric_conflicts": ordered[:40],
@@ -785,6 +803,12 @@ def page_report(report: dict) -> dict:
         # they found the same text and the same numbers. Different questions.
         "text_agreement": (report.get("variant_agreement") or {}).get("text_min"),
         "numeric_agreement": (report.get("variant_agreement") or {}).get("numeric_min"),
+        # The whole comparison, on every page, whether or not current policy
+        # makes a doubt of it. Which disagreements matter is a judgement that
+        # will be refined; the disagreements themselves are observation, and a
+        # rule that keeps them only when it already fired cannot be re-scored
+        # later against the pages it passed over.
+        "variant_agreement": report.get("variant_agreement"),
         "win_margin": margin,
         "variant_scores": {k: round(v, 1) for k, v in scores.items()},
         # Two separate claims, previously conflated under one name. The first
@@ -844,8 +868,9 @@ def doubts_for(report: dict, quality: dict, spread: float) -> list[dict]:
                                  "token_differences": agree.get("numeric_token_differences"),
                                  "count_differences": agree.get("numeric_count_differences"),
                                  "compared_against": agree.get("compared_against"),
-                                 "conflicts": [c for c in (agree.get("numeric_conflicts") or [])
-                                               if c["kind"] == "token_difference"][:20]},
+                                 "directions": agree.get("numeric_directions"),
+                                 # the conflicts themselves are on the page row
+                                 "see": "pages[].variant_agreement"},
                     "policy": {"flag_on": "any numeric token in one reading and not another"}})
     if report.get("retried"):
         out.append({"code": "needed_retry",
@@ -1157,7 +1182,7 @@ def verify_regdocs_url(doc_id: str, given: str | None) -> dict:
                 "source_url_check_error": str(exc)}
 
 
-META_SCHEMA = 2   # bumped when the shape of the meta changes
+META_SCHEMA = 3   # bumped when the shape of the meta changes
 # The document JSON is mostly repeated field names and coordinates and gzips to
 # about a tenth of its size; the PDF beside it is already compressed and gains
 # nothing from it. The meta stays plain text -- it is the file people open, and
