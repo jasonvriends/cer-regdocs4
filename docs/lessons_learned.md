@@ -1114,3 +1114,47 @@ cheap to thorough. They have different failure surfaces, and a page that
 defeats all of them produces no output rather than a bad one. That is the
 correct direction to fail in -- §11's principle -- but it means `PAGE_VARIANTS`
 needs at least one entry that cannot fail on size.
+
+### 14.9 The producer field, finally used
+
+`pdf_provenance()` has recorded the PDF producer of every document since §4,
+with a docstring promising that "the failures in this corpus are not spread
+evenly across tools" and that recording it makes the question answerable across
+a corpus. The question had never actually been asked. Over 4,296 documents it
+now can be.
+
+Of the nine pages where mojibake survived into the output:
+
+| producer | mojibake pages | that producer's pages |
+|---|---:|---:|
+| Acrobat Distiller 25.0 (Windows) | 4 | 46 |
+| Acrobat Distiller 26.0 (Windows) | 2 | 42 |
+| (absent) | 3 | 1,738 |
+| **Microsoft: Print To PDF** | **0** | 189 |
+| Adobe PDF Library | 0 | 5,817 |
+| Skia/PDF (Chrome print) | 0 | 2,515 |
+
+Six of the nine come from 88 pages produced by two versions of Acrobat
+Distiller: **6.8% against a corpus baseline of 0.06%**, about a hundredfold.
+Adobe PDF Library, the single largest producer at 5,817 pages, contributes
+none.
+
+The intuitive suspect is innocent. "Print To PDF" sounds like exactly the kind
+of virtual-printer path that would mangle a font, and it produced no mojibake
+at all across 189 pages — its seven low-letter-share pages are all legitimate
+dense numeric tables. So is Chrome's Skia across 2,515 pages. Distiller is a
+PostScript-to-PDF converter, and re-distilling through PostScript is where
+`ToUnicode` maps get dropped; a virtual printer embedding a TrueType subset
+keeps them.
+
+Two caveats that matter more than the ratio. **Six pages is not a sample**, and
+two Distiller versions with 88 pages between them is a thin base to generalise
+from. And this counts only mojibake that *survived*: 4647200's 315 unmapped
+pages are not here, because variant selection rasterised them and recovered the
+text. The measurement is of failures that got through, not of files that are
+broken.
+
+Still, it is a cheap pre-flight signal that costs nothing to read. A document
+whose producer is Distiller deserves its letter-share checked before its output
+is trusted, and that is decidable from the file's metadata before a single page
+is converted.
