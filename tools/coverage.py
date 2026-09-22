@@ -17,17 +17,52 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "output"
+# The reference extractions are not kept in this repo: they are large, they are
+# not ours, and they are only needed when something is being measured. They are
+# read in place from the pipeline that produced them.
+REF_ROOT = ROOT.parent / "cer-regdocs2/workspace/3_analyze/content-understanding/raw"
+
+
+def reference_for(doc_id: str) -> list[Path]:
+    """Every file making up one document's reference extraction.
+
+    Looks beside the output first so a copied-in reference still wins. In the
+    source pipeline's own store a long document is split: the top-level file
+    then covers only its first pages and the rest sit in a .parts directory,
+    so taking the first file found silently truncates the comparison. The
+    .meta.json siblings describe the parts and carry no page content.
+    """
+    local = OUT / doc_id / f"{doc_id}.azure.json"
+    if local.exists():
+        return [local]
+    for d in REF_ROOT.glob(f"*/*/{doc_id}"):
+        parts = sorted(pd.glob("pages-*.json") for pd in d.glob("*.parts"))
+        flat = [f for group in parts for f in group if not f.name.endswith(".meta.json")]
+        if flat:
+            return flat
+        files = [f for f in sorted(d.glob("*.json")) if not f.name.endswith(".meta.json")]
+        if files:
+            return files
+    return []
 norm = lambda s: re.sub(r"[^0-9a-z]", "", s.lower())
 
 
 def page_coverage(doc_id: str) -> dict | None:
     d = OUT / doc_id
     runs = sorted(d.glob("*/*.docling.json.gz")) + sorted(d.glob("*/*.docling.json"))
-    ref_file = d / f"{doc_id}.azure.json"
-    if not runs or not ref_file.exists():
+    ref_files = reference_for(doc_id)
+    if not runs or not ref_files:
         return None
-    ref = {p["pageNumber"]: collections.Counter(norm("".join(w["content"] for w in p.get("words", []))))
-           for p in json.loads(ref_file.read_text())["contents"][0]["pages"]}
+    ref = {}
+    for rf in ref_files:
+        try:
+            blob = json.loads(rf.read_text())
+        except Exception:
+            continue
+        for content in blob.get("contents") or []:
+            for p in content.get("pages") or []:
+                ref[p["pageNumber"]] = collections.Counter(
+                    norm("".join(w["content"] for w in p.get("words", []))))
     gc.collect()
     run = runs[-1]
     opener = gzip.open if run.suffix == ".gz" else open

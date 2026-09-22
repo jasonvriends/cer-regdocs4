@@ -829,3 +829,174 @@ which.
 - **The 0.2 control-character threshold** is tuned on one document. It matched
   314/316 here; it has not been tested on another filing.
 - **Everything in this document is one filing.** The corpus is not.
+
+## 14. Scaling from 16 filings to 8,210
+
+The sixteen documents this pipeline was built on were picked for size. That
+turned out to select for one thing above all others, and §6 understated how
+badly: they are not merely unrepresentative, they are the extreme tail.
+
+| | old corpus | full corpus |
+|---|---:|---:|
+| documents | 16 | 8,210 |
+| median pages | 553 | **2** |
+| mean pages | 581 | 11 |
+| documents over 200 pages | 16 (100%) | 71 (0.9%) |
+
+Every threshold in `ingest.py` was chosen against the 0.9%.
+
+### 14.1 The verdict at scale: the extractor holds up
+
+Measured against the same reference extractor, over 4,302 documents and 15,340
+pages:
+
+| | |
+|---|---:|
+| mean page coverage | **99.4%** |
+| median | 100.0% |
+| pages ≥95% | 14,992 (98%) |
+| pages 50–80% | 48 |
+| pages <50% | **19** |
+
+This is the first number in this document that is not about one filing. It is
+slightly *better* than the tuning document scored, which is the opposite of
+what §6 would predict — and the reason is in §14.2: most real filings are two
+pages of clean born-digital text, and the machinery built for the hard cases
+simply does not engage.
+
+`as-is` now wins 13,712 pages to `raster`'s 1,988. On the old corpus
+rasterisation was the main event; here it is 14% of pages. The variant list is
+still worth its cost, but it is earning that cost on a small minority.
+
+### 14.2 The quality score has a blind spot: numeric mojibake
+
+§7.2 chose "characters produced, weighted by the share that are letters or
+digits" and §4 recorded that it separates real text from mojibake, because
+mojibake scored 0.11 against 0.68–0.81 for real text.
+
+That is true only for the mojibake that was looked at. A text layer whose
+unmapped glyphs decode to *digits* scores as healthy text, because digits are
+alphanumeric:
+
+```
+docling: 33 39 38 39 43 39 i255 196 34 44 43 41 44 i255 37 41 44 45 36 …
+azure:   2026-03-28 Canada Gazette Part I, Vol. 160, No. 13 … COMMISSIONS …
+```
+
+That page has `alnum_ratio` **0.72** — indistinguishable from good text — and
+recovers 5.5% of the reference's characters. Four variants all "succeeded", the
+selector picked between them on a score that could not see the problem, and
+nothing in `doubts` fired except `variants_disagree_on_numbers`, which fires on
+half the corpus.
+
+The fix is to measure letters against digits rather than alphanumerics against
+everything. Across 14,947 pages the letter share is median 0.96, 5th percentile
+0.72, and **9 pages across 5 documents fall below 0.30 with fewer than five
+real words on the page**. All nine are this failure. A threshold on letter
+share alone is not enough — 35 further pages fall below 0.30 and are legitimate
+dense numeric tables, including 4647200's pages 16–18 and 24–28 — so the test
+that separates them is whether the page contains any running words at all.
+
+Two lessons, and the second is the one that matters:
+
+1. Numeric mojibake is invisible to `alnum_ratio` and affects ~0.06% of pages.
+2. **The detector was validated against the failure that had already been
+   found.** §4 reported it as confirmed on the strength of a single contrast
+   between one known-bad document and one known-good one. It took a corpus 500×
+   larger and an independent reference to find the variant it was blind to.
+   A self-check validated only on known failures certifies nothing about the
+   unknown ones.
+
+### 14.3 A correction to §9.4: the table gap was mostly a measurement bug
+
+§9.4 compared table cells against Azure by attributing every cell of a table to
+the page of its first cell. Tables that span pages therefore dumped entirely
+onto their first page, which invented enormous per-page deficits. Page 475 of
+4647200 was reported as thousands of cells short; attributing each cell to its
+own page gives docling 605 against the reference's 608.
+
+The corpus-level totals in §9.4 were not affected. The corrected per-page
+picture on 4647200:
+
+| | |
+|---|---:|
+| docling cells / reference non-empty cells | 152,640 / 175,840 = **87%** |
+| pages where docling ≥ reference | 237 of 929 |
+| pages below 75% of reference cells | 107 |
+| pages below 50% | **22** of 803 |
+
+The 886-vs-1,718 table count is mostly segmentation, not loss: 1,688 of the
+reference's tables are single-page, so docling is merging several tables on a
+page into one. Text recovery on the pages that looked worst is 100–105%.
+
+The gap is real but concentrated, and its worst cluster is pages 24–28.
+
+### 14.4 Alternative table extractors, measured
+
+Four local open-source candidates, scored on cell-content F1 against the
+reference over the 518 born-digital table pages of 4647200. **Raw cell counts
+were tried first and are worthless as a proxy** — pdfplumber produces far more
+cells than docling and most of them are wrong.
+
+| tool | F1 mean | median | ≥0.95 |
+|---|---:|---:|---:|
+| **docling** | **0.720** | 0.732 | 28 |
+| camelot-stream | 0.691 | 0.699 | 56 |
+| plumber-text | 0.560 | 0.657 | 10 |
+| plumber-lines | 0.544 | 0.668 | 74 |
+| camelot-lattice | 0.529 | 0.421 | 78 |
+
+Nothing beats docling overall, but they are complementary rather than
+competing — pdfplumber-lines wins 220 pages to docling's 186:
+
+| combination | F1 |
+|---|---:|
+| docling alone | 0.720 |
+| docling + plumber-lines | **0.838** |
+| oracle best-of-five | 0.856 |
+
+pdfplumber captures nearly all the available gain at 0.12s/page, MIT, and
+deterministic. On pages 24–28 — docling's worst cluster — it scores **1.00**
+against docling's 0.24–0.35. Camelot adds +0.018 over that pair and is not
+worth a second dependency.
+
+Two candidates produced no verdict. **Table Transformer** ran (transformers
+5.17 rejects its published config's null `dilation`, and its processor config
+omits `shortest_edge`; both are patchable) and scored 0.22–0.58, but its
+structure recognition found 49 rows × 20 columns against the reference's 53 ×
+22 — the gap was the harness, which ignored the 29 spanning cells it emitted,
+not the model. **PaddleOCR PP-StructureV3** never ran at all: paddlepaddle
+3.3.1 raises `ConvertPirAttribute2RuntimeAttribute not support` on every page.
+It remains the only realistic candidate for the rasterised pages, which nothing
+but docling has been measured on.
+
+The more useful finding may not be the +0.118. Grid under-segmentation
+currently raises no doubt code, because both TableFormer modes agree on the
+same coarse grid. **docling-vs-pdfplumber disagreement is a reference-free
+signal for exactly that**, and pdfplumber is cheap enough to run on every page.
+
+### 14.5 Do not measure a rule against a metric that cannot see what it catches
+
+The doubt rules were scored for precision against page coverage, and
+`comparator_change` came out at 0.0% and `table_grid_disputed` at 1.7%. Both
+numbers are meaningless. Coverage counts characters, so a lost `<`, one wrong
+digit, or a correct value in the wrong row moves it by nothing — and those are
+precisely what those rules exist to catch. Scoring them that way is circular.
+
+This is why `tools/triage.py` ranks tiers by consequence rather than by
+measured precision, and why it is a separate versioned policy rather than part
+of `ingest.py`: the extraction records what it saw, and what that is worth is a
+decision that should be revisable without producing a new run id.
+
+### 14.6 Throughput, and an estimate that was wrong twice
+
+Per-document fixed cost — interpreter start, imports, and building eight
+converters — is the dominant cost on a two-page filing. It was first estimated
+at 6.4s from a single warm document, then at ~30s from 23 documents. Over 2,135
+documents the real figure is 15.1s per document, with conversion 62% of wall
+time. The projections built on the small samples were wrong by 4× in one
+direction and 2× in the other.
+
+The lesson is dull and keeps recurring in this document: **an estimate from a
+handful of samples of a skewed corpus is not an estimate.** It is the same
+error as §6, in a different costume.
