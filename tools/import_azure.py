@@ -3,6 +3,8 @@
 
     python tools/import_azure.py [--apply] [doc_id ...]
 
+Covers every PDF in source/, whether or not it has been extracted yet.
+
 The reference extractions were made by a different pipeline, in another
 repository, and are stored there split into 300-page parts. That is awkward to
 compare against and easy to get wrong -- reading only the top-level file
@@ -111,8 +113,6 @@ def merge(files: list[Path]) -> tuple[dict, list[dict]]:
 
 def import_one(doc_id: str, sig: dict, rid: str, apply: bool) -> str:
     doc_root = OUT / doc_id
-    if not doc_root.is_dir():
-        return "no output directory"
     files = parts_for(doc_id)
     if not files:
         return "no reference found"
@@ -122,6 +122,10 @@ def import_one(doc_id: str, sig: dict, rid: str, apply: bool) -> str:
         return "already imported"
     if not apply:
         return f"would import {len(files)} part(s)"
+    # The reference does not depend on our extraction, so it is not gated on
+    # one having run. A document we have not converted yet still gets its
+    # reference; the extraction lands beside it later under its own run id.
+    doc_root.mkdir(parents=True, exist_ok=True)
     merged, provenance = merge(files)
     if merged is None:
         return "reference unreadable"
@@ -180,7 +184,8 @@ def main() -> int:
             f"Understanding (`{ANALYZER_ID}`, API `{API_VERSION}`), copied "
             f"here because that repository is not a dependency of this one "
             f"and the analysis cannot be re-run from here.\n", encoding="utf-8")
-    docs = docs or sorted(d.name for d in OUT.iterdir() if d.is_dir())
+    # Every document we hold a PDF for, not merely those already extracted.
+    docs = docs or sorted(p.stem for p in (ROOT / "source").glob("*.pdf"))
     tally = {}
     for doc_id in docs:
         result = import_one(doc_id, sig, rid, apply)
