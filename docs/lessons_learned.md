@@ -1000,3 +1000,56 @@ direction and 2× in the other.
 The lesson is dull and keeps recurring in this document: **an estimate from a
 handful of samples of a skewed corpus is not an estimate.** It is the same
 error as §6, in a different costume.
+
+### 14.7 A 0.2% failure rate that is not the pipeline's fault
+
+Seven documents were left unfinished by the first 4,304. Their `ingest.log`
+files all stop at the same place — the staging line, with no traceback and no
+further entry — which looked like a single unexplained failure mode. It is not.
+The logs stop there because that line is written *before* the converters are
+built, and the process dies during construction. What the shell saw:
+
+```
+Segmentation fault (core dumped)                        x5
+TypeError: 'set' object is not callable                 x2
+SystemError: error return without exception set         x1
+AttributeError: 'PackagePath' object has no attribute '_drv'   x1
+```
+
+None of these is an application error. `copy.copy` raising *'set' object is not
+callable* means the name `copy` no longer refers to a function; `SystemError:
+error return without exception set` is CPython reporting a violated internal
+invariant. These are memory-corruption signatures, and they are spread across
+three unrelated phases — converter construction, page conversion (§11's page
+401 segfault) and chunk merging — which is what random corruption looks like
+and what a bug in one code path does not.
+
+Nine failures in 4,304 documents is **0.2%**. In the same period the host
+rebooted twice with nothing in either boot's kernel log: no OOM kill, no Xid,
+no thermal event.
+
+Two candidates, and the evidence does not yet separate them:
+
+1. **Failing RAM.** Fits the randomness, the spread across phases, the
+   interpreter-state corruption and the unexplained host crashes. The machine
+   also runs with a `swapFile` declared in `.wslconfig` and `/proc/swaps`
+   empty, so there is no relief valve.
+2. **A native library writing out of bounds.** torch, RapidOCR and docling all
+   run native code in this path. A pure-Python race cannot rebind a builtin;
+   an out-of-bounds write can.
+
+This is recorded here because the obvious reading was wrong. The per-document
+logs suggested a reproducible pipeline defect worth debugging, and four
+documents were described that way before the shell output was checked. **The
+log that stops is not the log that explains** — `ingest.py` writes to its own
+`ingest.log`, so anything that kills the process without raising a Python
+exception leaves no trace there at all, and only the batch's stdout has it.
+
+One genuine application failure hides in the same set: 4692360 raises
+`RuntimeError: every variant failed`, with each variant reporting `Image size
+...`. A page docling cannot rasterise at any scale, and the first of its kind.
+
+The practical consequence is small — everything unfinished resumes, nothing is
+corrupted, and the atomic writes held through both host crashes — but a 0.2%
+random failure rate should be attributed before it is engineered around.
+Running a memory test is cheaper than debugging docling.
