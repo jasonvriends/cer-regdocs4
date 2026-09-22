@@ -1096,6 +1096,19 @@ so small pages get the full multiplier and huge ones degrade to whatever fits.
 Failing to rasterise a drawing at all is worse than rasterising it coarsely,
 and right now the pipeline chooses the former.
 
+Across all 8,210 source PDFs and roughly 90,000 pages, **13 pages in 5
+documents** exceed Pillow's limit at `RASTER_SCALE` 3.0 -- 0.06% of documents.
+Twelve of them are 92 x 92 inch square plot sheets in four consecutive filings
+(4646844-4646847) at 395 MP; the thirteenth is 4692360's alignment sheet at
+294 MP. Nothing in the corpus reaches `raster-hi`'s threshold at 4.5, because
+nothing that large survives 3.0 first.
+
+None of the five has been ingested successfully. 4692360 failed; the other
+four sit later in the manifest and have not been attempted. **They are a
+prediction: all four should fail the same way, since their pages are larger
+than the one already known to fail.** If they do not, the explanation here is
+wrong and the cause is something other than page size.
+
 This also explains something §7.5 could not: the variants are not a ladder from
 cheap to thorough. They have different failure surfaces, and a page that
 defeats all of them produces no output rather than a bad one. That is the
