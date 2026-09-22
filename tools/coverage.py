@@ -32,6 +32,12 @@ def reference_for(doc_id: str) -> list[Path]:
     so taking the first file found silently truncates the comparison. The
     .meta.json siblings describe the parts and carry no page content.
     """
+    # An imported reference (tools/import_azure.py) is one merged, compressed
+    # file in its own run directory and is preferred: it is already whole,
+    # whereas the source store must be reassembled from parts every time.
+    imported = sorted((OUT / doc_id).glob(f"*/{doc_id}.azure.json.gz"))
+    if imported:
+        return [imported[-1]]
     local = OUT / doc_id / f"{doc_id}.azure.json"
     if local.exists():
         return [local]
@@ -56,7 +62,11 @@ def page_coverage(doc_id: str) -> dict | None:
     ref = {}
     for rf in ref_files:
         try:
-            blob = json.loads(rf.read_text())
+            if rf.suffix == ".gz":
+                with gzip.open(rf, "rt", encoding="utf-8") as fh:
+                    blob = json.load(fh)
+            else:
+                blob = json.loads(rf.read_text())
         except Exception:
             continue
         for content in blob.get("contents") or []:
