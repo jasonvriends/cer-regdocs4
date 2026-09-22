@@ -1028,22 +1028,34 @@ Nine failures in 4,304 documents is **0.2%**. In the same period the host
 rebooted twice with nothing in either boot's kernel log: no OOM kill, no Xid,
 no thermal event.
 
-Two candidates, and the evidence does not yet separate them:
+The cause turned out to be mundane and external: the GPU was shared with a
+game while the batch ran. That is worth recording rather than dismissing,
+because the pipeline had no way to notice:
 
-1. **Failing RAM.** Fits the randomness, the spread across phases, the
-   interpreter-state corruption and the unexplained host crashes. The machine
-   also runs with a `swapFile` declared in `.wslconfig` and `/proc/swaps`
-   empty, so there is no relief valve.
-2. **A native library writing out of bounds.** torch, RapidOCR and docling all
-   run native code in this path. A pure-Python race cannot rebind a builtin;
-   an out-of-bounds write can.
+```python
+vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+if vram_gb >= MIN_VRAM_GB:
+    return "cuda"
+```
 
-This is recorded here because the obvious reading was wrong. The per-document
-logs suggested a reproducible pipeline defect worth debugging, and four
-documents were described that way before the shell output was checked. **The
-log that stops is not the log that explains** — `ingest.py` writes to its own
-`ingest.log`, so anything that kills the process without raising a Python
-exception leaves no trace there at all, and only the batch's stdout has it.
+`pick_device` reads **total** VRAM, not free VRAM. A 4090 reports 24 GB
+whether or not another process is holding 20 of them, so the check passes
+every time and the run commits to CUDA regardless. Worse, the check happens
+once at start-up: even a free-memory test would not help when the contending
+process appears later, which is exactly what happened here. Every one of these
+failures logged `gpu: NVIDIA GeForce RTX 4090 (24 GB) -> cuda` moments before
+dying.
+
+Allocation failures under VRAM pressure surface from native code as segfaults
+and as corrupted interpreter state, which is why the symptoms looked like
+failing hardware. They are the same event seen from Python.
+
+The hardware hypothesis was wrong, and it was wrong in an expensive direction:
+it would have sent someone to run memory tests on a machine whose real problem
+was that nothing stops the pipeline sharing a GPU. The lesson is not about
+VRAM. **Corruption-shaped symptoms are not evidence of corrupted hardware when
+an untracked process can contend for the same accelerator.** Ask what else was
+running before concluding anything about the machine.
 
 One genuine application failure hides in the same set: 4692360 raises
 `RuntimeError: every variant failed`, with each variant reporting `Image size
@@ -1053,3 +1065,39 @@ The practical consequence is small — everything unfinished resumes, nothing is
 corrupted, and the atomic writes held through both host crashes — but a 0.2%
 random failure rate should be attributed before it is engineered around.
 Running a memory test is cheaper than debugging docling.
+
+### 14.8 A fixed raster scale fails on drawing sheets
+
+4692360 is the one genuine pipeline failure in the batch, and it is not subtle
+once the page is measured:
+
+```
+page 1: 13140 x 2484 pt = 182.5 x 34.5 inches
+  at RASTER_SCALE 3.0 -> 39420 x  7452 px = 294 megapixels
+  at raster-hi   4.5 -> 59130 x 11178 px = 661 megapixels
+```
+
+A fifteen-foot pipeline alignment sheet. Every variant failed with `Image size
+...`, and the run ended with `RuntimeError: every variant failed`. Pillow
+refuses images over roughly 178 MP by default as a decompression-bomb guard,
+so all four variants hit the same wall — including `as-is`, because docling
+rasterises internally for layout analysis even when the text layer is kept.
+
+The fault is the shape of the setting, not its value. `RASTER_SCALE` is a
+multiplier, so the output size is whatever the input happens to be times three.
+That is fine for the letter and tabloid pages the corpus is mostly made of and
+unbounded for a plan-and-profile drawing, which is a normal thing to find in a
+CER filing. §7.5 treats `raster-hi` (4.5) as strictly more detail than
+`raster` (3.0); on a page like this it is strictly more likely to fail.
+
+**A scale is not a budget.** The setting that generalises is a pixel ceiling:
+choose the scale per page as `min(RASTER_SCALE, sqrt(MAX_PIXELS / (w * h)))`,
+so small pages get the full multiplier and huge ones degrade to whatever fits.
+Failing to rasterise a drawing at all is worse than rasterising it coarsely,
+and right now the pipeline chooses the former.
+
+This also explains something §7.5 could not: the variants are not a ladder from
+cheap to thorough. They have different failure surfaces, and a page that
+defeats all of them produces no output rather than a bad one. That is the
+correct direction to fail in -- §11's principle -- but it means `PAGE_VARIANTS`
+needs at least one entry that cannot fail on size.
