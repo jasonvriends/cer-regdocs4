@@ -43,7 +43,12 @@ def main() -> int:
     print(f"{'document':>10} {'run':>9} {'state':>12}  detail")
     for doc_dir in sorted(d for d in root.iterdir() if d.is_dir()):
         doc_id = doc_dir.name
-        runs = sorted(d for d in doc_dir.iterdir() if d.is_dir())
+        # A reference extraction (tools/import_azure.py) lives in a run
+        # directory too, but it is not ours and cannot be "unfinished". It is
+        # recognised by what it holds rather than by its name, so a renamed or
+        # re-versioned import is still skipped.
+        runs = sorted(d for d in doc_dir.iterdir() if d.is_dir()
+                      and not (d / f"{doc_id}.azure.meta.json").exists())
         if not runs:
             print(f"{doc_id:>10} {'-':>9} {'not started':>12}")
             incomplete.append((doc_id, "not started", None))
