@@ -21,10 +21,27 @@ CER filings and are documented where they are non-obvious.
 ## Usage
 
 ```bash
-./setup.sh                              # create .venv, install docling
-.venv/bin/python ingest.py <pdf-or-url> # ingest one filing
-# change a setting and re-run: the new run lands beside the old
+./setup.sh                                                        # create .venv, install docling
+.venv/bin/python scout.py scout --from 2026-08-01 --to 2026-08-31 # find filings, record their metadata
+.venv/bin/python scout.py download                                # fetch the PDFs into source/
+.venv/bin/python ingest.py source/4647200.pdf                     # extract one filing
 ```
+
+To extract everything in `source/`, smallest file first so results arrive
+early and the long filings come last:
+
+```bash
+ls -Sr source/*.pdf | while read f; do
+  .venv/bin/python ingest.py "$f"
+done >> batch.log 2>&1
+```
+
+Finished documents are skipped, so the same command resumes after a crash.
+Keep `batch.log`: a crash in native code (a segfault) leaves nothing in the
+document's own `ingest.log`, and the batch's output is the only record of it.
+`tools/status.py` lists anything that did not finish.
+
+## Output
 
 Output is written per **run of settings**, not per document:
 
@@ -43,20 +60,6 @@ sits in the document folder rather than a run folder because nothing ran to
 produce it: it is what REGDOCS says about the filing, with a history of what
 changed, written by `scout.py`. The reference extraction is written by
 `tools/import_azure.py`.
-
-## Finding and fetching filings
-
-```bash
-.venv/bin/python scout.py scout --from 2026-08-01 --to 2026-08-31   # find PDFs, update records
-.venv/bin/python scout.py download                                  # fetch any not yet in source/
-```
-
-`scout.py` searches REGDOCS by date, walks Compound Documents and Folders to
-learn which filings each document belongs to, and reads the five facet
-categories. It records PDF documents only. A document whose PDF is already in
-`source/` is never downloaded again; its record is compared with what REGDOCS
-says now and updated where it differs, with each change kept. Requests are
-paced at one every 2-4 seconds.
 
 `runs.json` is derived and safe to delete — the next ingest rebuilds it from
 whatever run directories exist. Each run keeps a copy of `ingest.py`: the meta
@@ -79,6 +82,61 @@ to compare against.
 
 Markdown is a lossy projection and is not written; export it from the JSON when
 needed (`doc.export_to_markdown()`).
+
+## Finding and fetching filings
+
+`scout.py` finds filings on REGDOCS and keeps one record per document in
+`output/<id>/<id>.cer.meta.json`. It searches by date, follows Compound
+Documents and Folders to learn which filings each document belongs to, and
+reads REGDOCS's five facet categories (Document Type, Application Type,
+Commodity, Role, File Type). Only PDF documents get a record; HTML documents
+and containers are skipped.
+
+```bash
+.venv/bin/python scout.py scout --from 2026-01-05 --to 2026-01-05 --dry-run
+```
+
+```
+scouting 2026-01-05 .. 2026-01-05
+base search: 30 item(s)
+  container 4633939: 2 member(s), complete
+  ...
+facets: 5 categories, 156 values
+
+180 request(s)
+                                     unchanged: 17
+              skipped: container or paper-only: 11
+                        skipped: Html Document: 9
+```
+
+`--dry-run` reports what would change without writing. Without it, new
+documents get a record, and existing records are compared with what REGDOCS
+says now and updated where it differs. `scout.py download` then fetches every
+recorded PDF that is not already in `source/`.
+
+**A PDF already in `source/` is never downloaded again.** Only its record is
+refreshed. Every change is kept, so re-tagging by REGDOCS is visible over time:
+
+```json
+"facets": { "Document Type": ["Application"], "Commodity": ["Gas"], ... },
+"first_seen_at": "2026-08-07T01:33:56+00:00",
+"last_seen_at":  "2026-10-01T00:00:00+00:00",
+"changes": [
+  { "field": "facets.Document Type",
+    "old": ["Supplemental Information"], "new": ["Application"],
+    "observed_at": "2026-10-01T00:00:00+00:00" }
+]
+```
+
+A scrape that partly fails cannot erase anything: a field is only replaced by
+a non-empty value, a facet is replaced outright only when every search for it
+finished, and a filing membership is dropped only when that filing was read in
+full without the document in it.
+
+Requests are paced at one every 2-4 seconds, one at a time. The one-day scout
+above took 180 requests, about ten minutes, most of them the 156 facet
+searches. Longer ranges need more pages per search and more containers, so
+they cost more than the day count alone suggests.
 
 ## What it does per page
 
@@ -171,45 +229,11 @@ selection:
 Coverage counts characters, so it weighs a missing "the" the same as a wrong
 digit. Numeric agreement is the more meaningful figure for this corpus.
 
-## Asset ownership ledger
-
-The extraction feeds a regulatory asset inventory: an append-only, bitemporal
-record of **who holds which asset, who held it before, and the document that
-proves each step**.
-
-```bash
-.venv/bin/python ideas/idea1/ledger.py init
-.venv/bin/python ideas/idea1/ledger.py load 4647200
-.venv/bin/python ideas/idea1/ledger.py holdings "Foothills"
-.venv/bin/python ideas/idea1/ledger.py review    # what a human still needs to confirm
-```
-
-Nothing is ever updated or deleted — corrections supersede. Every row points at
-immutable evidence (document, page, docling element, exact quote, hashed). A
-name change is recorded separately from an ownership change, because
-TransCanada Corporation becoming TC Energy Corporation kept every asset, while
-a sale does not.
-
-Company identity is anchored to REGDOCS metadata and corporate registries, not
-to OCR'd prose — the regulator states the filing company of every document, and
-that is the one company fact that does not depend on reading a PDF correctly.
-Every spelling seen, including OCR damage, is attached to the resolved entity.
-Ambiguous matches are queued for a human rather than guessed, because a wrong
-merge moves assets between owners invisibly while a duplicate is obvious.
-
-This is built on top of the extractor and lives in
-[ideas/idea1/](ideas/idea1/), which holds everything specific to it:
-`inventory.py` (extraction), `schema.sql` (the ledger), `ledger.py` (loader and
-queries) and the design notes. Nothing in it changes `ingest.py`.
-
-See [ideas/idea1/ledger.md](ideas/idea1/ledger.md) for the schema, the
-entity-resolution rules, and the corpus strategy — including the measurement
-that only **0.26%** of extracted text contains any ownership language, which is
-why an LLM belongs on retrieved candidate passages rather than on every page.
-
 ## Test corpus
 
-Sixteen CER REGDOCS filings, 9,294 pages, spanning born-digital reports,
+The working corpus is whatever `scout.py` has found: 8,210 PDF filings as of
+September 2026. Development and most of the measurement in the lessons learned
+used a subset of sixteen filings, 9,294 pages, spanning born-digital reports,
 scanned filings, French-language documents, drawing sets and laboratory
 certificate bundles. The PDFs are not committed; every document is listed with
 its REGDOCS download link in [docs/test_corpus.md](docs/test_corpus.md).
@@ -228,31 +252,39 @@ PDFs and extraction output are deliberately kept out of git (`source/`,
 
 ## Adding a document
 
-Copy the PDF into `source/`, with its metadata sidecar if the download pipeline
-wrote one:
+Scout the date it was filed and download it:
 
 ```bash
-cp ../cer-regdocs2/workspace/2_download/files/4647200.{pdf,metadata.json} source/
+.venv/bin/python scout.py scout --from 2026-01-30 --to 2026-01-30
+.venv/bin/python scout.py download
 ```
 
-`ingest.py` reads `<pdf>.metadata.json` if it is there and records the filing's
-title, company, filing number and date in the meta, and checks the sidecar's
-sha256 against the bytes it actually read. Without a sidecar everything still
-works — the meta keeps the file hash and a REGDOCS download link derived from
-the filename and verified over the network — it just has no filing identifiers.
-
-A URL works too, and lands in `source/` under the document id:
+That gives it a record as well as a file. A single URL also works, straight
+into the extractor, landing in `source/` under the document id -- but without a
+record, so the extraction has no filing number, company or facets beside it:
 
 ```bash
 .venv/bin/python ingest.py https://apps.cer-rec.gc.ca/REGDOCS/File/Download/4647200
 ```
 
+## Tools
+
+| | |
+|---|---|
+| `tools/status.py` | which documents did not finish, and where each one stopped |
+| `tools/triage.py` | sorts pages into review tiers from the stored doubts; a policy, versioned separately from extraction |
+| `tools/coverage.py` | page coverage against the reference extraction |
+| `tools/import_azure.py` | lands the reference extraction beside ours, merged from its parts |
+
 ## Documentation
 
 - [docs/test_corpus.md](docs/test_corpus.md) — the sixteen filings used for
   development and measurement, with download links.
-- [ideas/idea1/](ideas/idea1/) — asset ownership ledger: schema, entity
-  resolution, extraction stage, and how to scale across the corpus.
+- [docs/filing_guidance.md](docs/filing_guidance.md) — what filers could do
+  differently, with the measured rate of each defect; evidence for the filing
+  manual.
+- [runs/README.md](runs/README.md) — what the run directories hold and why the
+  code behind each run is kept.
 - [docs/lessons_learned.md](docs/lessons_learned.md) — what was changed across
   five tuning runs, why, what it measured, what was tried and rejected, and
   where a commercial extractor is still ahead. Read this before changing
