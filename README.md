@@ -31,12 +31,26 @@ To extract everything in `source/`, smallest file first so results arrive
 early and the long filings come last:
 
 ```bash
+RUN=0dd494e0
 ls -Sr source/*.pdf | while read f; do
-  .venv/bin/python ingest.py "$f"
+  id=$(basename "$f" .pdf)
+  [ -e "output/$id/$RUN/$id.docling.meta.json" ] && continue
+  .venv/bin/python ingest.py "$f" --run-id=$RUN
 done >> batch.log 2>&1
 ```
 
-Finished documents are skipped, so the same command resumes after a crash.
+The same command resumes after a crash. Finished documents are skipped in the
+shell rather than by `ingest.py`, because starting it loads docling before it
+can tell a document is done -- a few seconds each, hours across thousands.
+
+`--run-id` pins the run: while the code is being worked on, changes land under
+the existing id instead of starting a new one, so nothing finished is redone.
+That also means a change reaches only documents not yet finished; to apply it
+to one that is, delete its `output/<id>/<run>/` folder. Each document's meta
+records the exact code that produced it (`ingest.sha256`, `run_id_computed`,
+`pages_from_other_code`), so a run holding output from several versions of the
+code can be taken apart later. Drop `--run-id` when a change should start a
+fresh run.
 Keep `batch.log`: a crash in native code (a segfault) leaves nothing in the
 document's own `ingest.log`, and the batch's output is the only record of it.
 `tools/status.py` lists anything that did not finish.

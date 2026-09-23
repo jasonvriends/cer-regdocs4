@@ -16,6 +16,14 @@ records `"dirty": true` in its meta and cannot be recovered from the repository
 history — for those runs this directory holds the only copy of the code behind
 the extraction, which is the whole reason the copy exists.
 
+### Pinned runs -- `<run id>.<hash>.py`
+
+A run pinned with `ingest.py --run-id=<id>` keeps its id while the code
+changes. Each version of the code that produced documents under it is kept as
+`<run id>.<first 8 of its sha256>.py` beside the original, and each document's
+meta names the copy it came from (`ingest.copy`). No document is left without
+the code that made it.
+
 ## Reference extractions — `az<hash>/`
 
 Run ids beginning `az` are **not ours**. They hold the reference extraction
