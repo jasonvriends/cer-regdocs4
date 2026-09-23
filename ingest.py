@@ -13,13 +13,13 @@ there.
 
 Nothing overwrites a finished run. To redo one, delete its directory.
 
---run-id=<id> pins the run: the output goes under that id however the code has
-changed since, and documents already finished under it are skipped. It is for
-working on the code without re-extracting everything -- which also means a
-change reaches only documents not yet finished. Each document's meta still
-records the exact code that produced it, so a pinned run holding output from
-several versions can be told apart afterwards. Only an existing run can be
-pinned, so a mistyped id cannot start a new one.
+--run-id=<id> names the run instead of deriving the name from the code. The
+output goes under that id however the code has changed, and documents already
+finished under it are skipped: an existing id keeps adding to that run while
+the code is worked on, a new one starts a run. A change therefore reaches only
+documents not yet finished under the id. Each document's meta records the exact
+code that produced it, so a run holding output from several versions of the
+code can be taken apart afterwards.
 
 --cleanup keeps each document's newest finished run and reports which older ones
 would go; --apply then deletes them. --keep-run pins a run other than the newest.
@@ -1266,7 +1266,7 @@ def keep_script(rid: str, sha256: str | None = None) -> str:
     store = Path("runs")
     store.mkdir(parents=True, exist_ok=True)
     dest = store / f"{rid}.py"
-    # A pinned run can be produced by more than one version of the code. Each
+    # A named run can be produced by more than one version of the code. Each
     # version is kept beside the first, named by its own hash, so no document
     # is left without the code that made it.
     if dest.exists() and sha256 and hashlib.sha256(dest.read_bytes()).hexdigest() != sha256:
@@ -1501,11 +1501,15 @@ def main() -> None:
     # file may have been edited by then.
     fingerprint = ingest_fingerprint()
     computed = run_id(signature)
-    pinned = next((f.split("=", 1)[1] for f in flags if f.startswith("--run-id=")), None)
-    if pinned is not None:
-        if not re.fullmatch(r"[0-9a-f]{8}", pinned) or not (Path("runs") / f"{pinned}.py").exists():
-            sys.exit(f"--run-id={pinned}: no such run (runs/{pinned}.py does not exist)")
-        rid = pinned
+    given = next((f.split("=", 1)[1] for f in flags if f.startswith("--run-id=")), None)
+    if given is not None:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,39}", given):
+            sys.exit(f"--run-id={given}: use letters, digits, '.', '_' or '-'")
+        # runs/<id>/ as a directory is a reference extraction's; writing ours
+        # into output/<doc>/<id>/ would land it in that folder.
+        if (Path("runs") / given).is_dir():
+            sys.exit(f"--run-id={given}: that id belongs to a reference extraction")
+        rid = given
     else:
         rid = computed
     doc_root, out = out, out / rid
@@ -1523,8 +1527,8 @@ def main() -> None:
         return
     global _log_file
     _log_file = out / "ingest.log"
-    log(f"{doc_id}: run {rid}" + (f" (pinned; this code alone would be {computed})"
-                                  if pinned and pinned != computed else ""))
+    log(f"{doc_id}: run {rid}" + (f" (given; this code alone would be {computed})"
+                                  if given and given != computed else ""))
     script_copy = keep_script(rid, fingerprint["sha256"])
     total = len(pdfium.PdfDocument(str(pdf)))
 
@@ -1545,17 +1549,17 @@ def main() -> None:
             stale = True
     else:
         stale = any(chunks.glob("*.docling.json"))
-    # Under a pinned run, pages already converted are the point: they are kept,
-    # and the code that converted them is recorded so the mix is visible.
+    # Under a given run id, pages already converted are the point: they are
+    # kept, and the code that converted them is recorded so the mix is visible.
     mixed_log = chunks / "other_code.json"
     other_code = json.loads(mixed_log.read_text()) if mixed_log.exists() else []
-    if stale and pinned and any(chunks.glob("*.docling.json")):
+    if stale and given and any(chunks.glob("*.docling.json")):
         before = (prior or {}).get("ingest_sha256", "unknown")
         if before not in other_code:
             other_code.append(before)
             write_atomic(mixed_log, json.dumps(other_code) + "\n")
         log(f"{doc_id}: kept {len(list(chunks.glob('*.docling.json')))} page(s) converted "
-            f"by other code, because the run is pinned")
+            f"by other code, because the run id was given")
         stale = False
     if stale:
         dropped = sorted(chunks.glob("*.docling.json"))
@@ -1936,10 +1940,10 @@ def main() -> None:
         "doubt_schema": DOUBT_SCHEMA,
         "doc_id": doc_id,
         "run_id": rid,
-        # A pinned run keeps its id across code changes. What this code alone
-        # would have been called, and any code that converted some of this
+        # A given run id holds across code changes. What this code alone would
+        # have been called, and any code that converted some of this
         # document's pages before, are recorded so the mix can be found.
-        "run_id_pinned": pinned is not None,
+        "run_id_given": given is not None,
         "run_id_computed": computed,
         "pages_from_other_code": other_code,
         "source": source,

@@ -43,14 +43,16 @@ The same command resumes after a crash. Finished documents are skipped in the
 shell rather than by `ingest.py`, because starting it loads docling before it
 can tell a document is done -- a few seconds each, hours across thousands.
 
-`--run-id` pins the run: while the code is being worked on, changes land under
-the existing id instead of starting a new one, so nothing finished is redone.
-That also means a change reaches only documents not yet finished; to apply it
-to one that is, delete its `output/<id>/<run>/` folder. Each document's meta
-records the exact code that produced it (`ingest.sha256`, `run_id_computed`,
-`pages_from_other_code`), so a run holding output from several versions of the
-code can be taken apart later. Drop `--run-id` when a change should start a
-fresh run.
+`--run-id` lets you say which run the output belongs to, instead of having it
+derived from the code. Without it, any edit to `ingest.py` -- a comment
+included -- gives every document a new id and the next pass re-extracts
+everything; with it, you choose when that happens. Give an existing id to keep
+adding to that run while you work on the code, or a new name (`--run-id=poc3`)
+to start one. A change reaches only documents not yet finished under that id;
+to apply it to one that is, delete its `output/<id>/<run>/` folder. Each
+document's meta records the exact code that produced it (`ingest.sha256`,
+`run_id_computed`, `pages_from_other_code`), so a run holding output from
+several versions of the code can be taken apart later.
 Keep `batch.log`: a crash in native code (a segfault) leaves nothing in the
 document's own `ingest.log`, and the batch's output is the only record of it.
 `tools/status.py` lists anything that did not finish.
@@ -176,19 +178,6 @@ includes it instead.
 
 The record is separate from the extraction, so it can be added at any time
 without re-running `ingest.py`.
-
-### Checking the scout still reads REGDOCS
-
-```bash
-.venv/bin/python scout.py selftest      # 25 checks, offline, a second or two
-```
-
-Every parser and rule is checked against real REGDOCS pages saved in
-`tests/regdocs/`: a day's search results, the facet list, a filing and its
-member list, and a document page. The likeliest way the scout breaks is
-REGDOCS changing its HTML, and a parser that stops matching fails quietly --
-it returns fewer rows, and a short result looks like a quiet day. If a live
-scout and the selftest disagree, re-save the pages and look.
 
 ### What a partial scrape cannot do
 
