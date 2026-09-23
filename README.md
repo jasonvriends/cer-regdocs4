@@ -40,8 +40,23 @@ output/<id>/
 
 The script behind each run is kept under `runs/<run id>`. `cer.meta.json`
 sits in the document folder rather than a run folder because nothing ran to
-produce it: it is a fact about the filing, written by `tools/import_cer.py`.
-The reference extraction is written by `tools/import_azure.py`.
+produce it: it is what REGDOCS says about the filing, with a history of what
+changed, written by `scout.py`. The reference extraction is written by
+`tools/import_azure.py`.
+
+## Finding and fetching filings
+
+```bash
+.venv/bin/python scout.py scout --from 2026-08-01 --to 2026-08-31   # find PDFs, update records
+.venv/bin/python scout.py download                                  # fetch any not yet in source/
+```
+
+`scout.py` searches REGDOCS by date, walks Compound Documents and Folders to
+learn which filings each document belongs to, and reads the five facet
+categories. It records PDF documents only. A document whose PDF is already in
+`source/` is never downloaded again; its record is compared with what REGDOCS
+says now and updated where it differs, with each change kept. Requests are
+paced at one every 2-4 seconds.
 
 `runs.json` is derived and safe to delete — the next ingest rebuilds it from
 whatever run directories exist. Each run keeps a copy of `ingest.py`: the meta
