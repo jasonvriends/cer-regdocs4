@@ -163,6 +163,19 @@ includes it instead.
 The record is separate from the extraction, so it can be added at any time
 without re-running `ingest.py`.
 
+### Checking the scout still reads REGDOCS
+
+```bash
+.venv/bin/python scout.py selftest      # 25 checks, offline, a second or two
+```
+
+Every parser and rule is checked against real REGDOCS pages saved in
+`tests/regdocs/`: a day's search results, the facet list, a filing and its
+member list, and a document page. The likeliest way the scout breaks is
+REGDOCS changing its HTML, and a parser that stops matching fails quietly --
+it returns fewer rows, and a short result looks like a quiet day. If a live
+scout and the selftest disagree, re-save the pages and look.
+
 ### What a partial scrape cannot do
 
 A scrape that partly fails cannot erase anything: a field is only replaced by
@@ -252,6 +265,21 @@ The worst failure found so far — 315 pages of mojibake — was completely sile
 ## Accuracy
 
 Measured against an independent extraction of the same filings.
+
+Across the corpus, measured on 4,302 documents and 15,340 pages part-way
+through the full run (lessons learned §14.1):
+
+| | |
+|---|---:|
+| mean page coverage | **99.4%** |
+| median | 100.0% |
+| pages ≥95% | 14,992 (98%) |
+| pages <50% | 19 |
+
+Most filings are a few pages of clean born-digital text, which is why this is
+higher than the tuning documents below scored. Nine pages in five documents
+carry mojibake that the quality score cannot see (§14.2); coverage catches it,
+the pipeline does not yet.
 
 Per-page variant selection, on the two documents where it has been measured
 end to end:

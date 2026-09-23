@@ -822,13 +822,33 @@ which.
   ~+0.3 document-wide) is small, so this is not urgent.
 - **Checkboxes and barcodes** — untouched. Barcodes would need a decoder pass
   (`pyzbar`) over picture regions.
-- **Table structure has never been measured properly.** Coverage and numeric
-  agreement are both blind to a table whose values are all correct and all in
-  the wrong rows. `docling-eval` is not directly usable (it needs ground-truth
-  datasets), but its TEDS metric is the right idea.
-- **The 0.2 control-character threshold** is tuned on one document. It matched
-  314/316 here; it has not been tested on another filing.
-- **Everything in this document is one filing.** The corpus is not.
+- **Table structure is measured against a reference, not against truth.**
+  §14.4 scores cell content against the reference extraction (docling 0.720
+  F1 on 4647200's born-digital table pages), which is blind to a reference
+  that is itself wrong. `docling-eval`'s TEDS metric is still the right idea
+  if ground truth is ever built.
+- **The 0.2 control-character threshold** was tuned on one document. The
+  corpus-wide sweep (§14) found the failure it was built for handled; it did
+  not test the threshold in isolation.
+- ~~Everything in this document is one filing.~~ Sections 1-13 are; §14 is
+  8,210.
+
+Three known defects in `ingest.py`, recorded rather than fixed because any
+edit to it gives every document a new run id -- to be done together, once, as
+a deliberate second run:
+
+- **`pick_device` reads total VRAM, not free, and only once** (§14.7). A GPU
+  shared with another process passes the check and then fails under it.
+- **`RASTER_SCALE` is a multiplier, not a pixel budget** (§14.8). Thirteen
+  pages in five documents are too large to rasterise at any variant's scale.
+- **The quality score cannot see numeric mojibake** (§14.2). A letter-share
+  test separates it, provided dense numeric tables are told apart by the
+  presence of running words.
+
+Also for that run: pdfplumber as a second opinion on tables (§14.4), whose
+disagreement with docling is the only reference-free signal found for grid
+under-segmentation; and the module docstring, which still gives the chunk
+path as `output/<id>/chunks/` rather than `output/<id>/<run>/chunks/`.
 
 ## 14. Scaling from 16 filings to 8,210
 

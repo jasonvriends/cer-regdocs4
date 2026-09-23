@@ -4,6 +4,7 @@
     python scout.py scout --from 2026-01-01 --to 2026-07-31 [--dry-run]
     python scout.py doc 4647200 [4692360 ...] [--dry-run]
     python scout.py missing [--dry-run]
+    python scout.py selftest
     python scout.py download [--limit N]
     python scout.py seed ../cer-regdocs2/workspace/2_download/files
 
@@ -1088,6 +1089,125 @@ def cmd_seed(args) -> int:
     return 0
 
 
+FIXTURES = ROOT / "tests" / "regdocs"
+
+
+def cmd_selftest(args) -> int:
+    """Check every parser and rule against saved REGDOCS pages, offline.
+
+    The likeliest way this script breaks is REGDOCS changing its HTML, and a
+    parser that stops matching fails quietly: it returns fewer rows, and a
+    short result looks like a quiet day. These fixtures are real pages saved
+    on 2026-09-23; when REGDOCS changes, a live run and this test will
+    disagree, and that is the signal to re-save them and look.
+    """
+    results: list[tuple[bool, str]] = []
+
+    def check(name: str, cond: bool, detail: str = "") -> None:
+        results.append((bool(cond), name + (f"  ({detail})" if detail and not cond else "")))
+
+    page = lambda n: (FIXTURES / n).read_text(encoding="utf-8")
+
+    # --- parsers, against real pages
+    search = page("search_2026-01-05.html")
+    rows = parse_rows(search)
+    kinds = defaultdict(int)
+    for r in rows:
+        kinds[r.kind] += 1
+    check("search page: 30 rows, total 30", len(rows) == 30 and parse_total(search) == 30,
+          f"{len(rows)} rows, total {parse_total(search)}")
+    check("search page: kinds 14 PDF / 8 Compound / 7 Html / 1 Folder",
+          dict(kinds) == {"PDF Document": 14, "Compound Document": 8,
+                          "Html Document": 7, "Folder": 1}, str(dict(kinds)))
+    r = next((x for x in rows if x.document_id == "4642410"), None)
+    check("search row 4642410: date, kind, filing, company",
+          r is not None and (r.date, r.kind, r.is_file, r.filing_number, r.filing_id,
+                             r.company, r.company_id)
+          == ("2026-01-05", "PDF Document", True, "C37818", "4642409",
+              "Plains Midstream Canada ULC", "534348"), str(r))
+    cat = facet_catalog(page("advanced.html"))
+    check("facet catalog: 5 categories, 156 values",
+          len(cat) == 5 and sum(map(len, cat.values())) == 156
+          and len(cat.get("Document Type", {})) == 78, str({k: len(v) for k, v in cat.items()}))
+    check("container page declares its member list",
+          container_endpoint(page("container_4642409.html"), VIEW_URL.format(id="4642409"),
+                             "4642409") == f"{DOMAIN}/REGDOCS/Item/LoadResult/4642409")
+    frag = page("container_4642409_members.html")
+    members = parse_rows(frag, container_id="4642409")
+    check("container members: 4642410 and 4642411, total 2",
+          [m.document_id for m in members] == ["4642410", "4642411"] and parse_total(frag) == 2,
+          str([m.document_id for m in members]))
+    check("breadcrumb names the filing as parent",
+          breadcrumb_parent(page("view_4642410.html"), "4642410") == "4642409")
+    check("a maintenance page is not mistaken for results",
+          not recognized("<html><body>Service temporarily unavailable</body></html>"))
+    check("title identifiers",
+          title_identifiers(r.name if r else "") == {
+              "filing_number": ["C37818"], "filing_sequence": ["1"],
+              "exhibit_number": ["A9R9C4"], "activity_number": ["OM2025-393"]})
+    check("title language marker",
+          title_identifiers("C38105-2 Rapport GH-001-2024 - FR - A9X1Y2").get("language_marker") == ["fr"])
+
+    # --- dates
+    check("day past month end is clamped",
+          (parse_day("2026-09-31"), parse_day("2024-02-30")) == ("2026-09-30", "2024-02-29"))
+    for bad in ("26-9-1", "0026-09-01", "2026-13-01", "2026-09-00", "2026/09/01"):
+        try:
+            parse_day(bad)
+            check(f"refuses {bad}", False, "accepted")
+        except ValueError:
+            check(f"refuses {bad}", True)
+
+    class FakeHttp:
+        requests = 0
+        def get(self, url, **kw):
+            self.requests += 1
+            return True, search, url, None
+    try:
+        crawl_search(FakeHttp(), {"sd": "2026-01-06", "ed": "2026-01-06"})
+        check("rows outside the range stop the search", False, "not stopped")
+    except RangeIgnored:
+        check("rows outside the range stop the search", True)
+    got, ok = crawl_search(FakeHttp(), {"sd": "2026-01-05", "ed": "2026-01-05"})
+    check("rows inside the range pass", ok and len(got) == 30)
+
+    # --- merge rules
+    when1, when2 = "2026-10-01T00:00:00+00:00", "2026-11-01T00:00:00+00:00"
+    obs = record_from_row(r)
+    box = {"id": "4642409", "kind": "Compound Document", "title": "C37818 ..."}
+    done = {"Document Type": True, "Commodity": True}
+    rec, ch = merge(None, "4642410", obs, {"Document Type": ["Letter"], "Commodity": ["Oil"]},
+                    done, True, [box], set(), when1)
+    check("a new record logs no changes", ch == [] and rec["changes"] == [])
+    rec, ch = merge(rec, "4642410", obs, {"Document Type": ["Order"], "Commodity": ["Oil"]},
+                    done, True, [box], set(), when2)
+    check("a facet change is kept with old, new and date",
+          ch == [{"field": "facets.Document Type", "old": ["Letter"], "new": ["Order"],
+                  "observed_at": when2}], str(ch))
+    rec2, ch = merge(rec, "4642410", obs, {"Document Type": ["Order"], "Commodity": []},
+                     {"Document Type": True, "Commodity": False}, True, [box], set(), when2)
+    check("an unfinished facet search removes nothing", rec2["facets"]["Commodity"] == ["Oil"] and ch == [])
+    rec2, ch = merge(rec, "4642410", obs, {"Document Type": [], "Commodity": []},
+                     done, False, [box], set(), when2)
+    check("a document outside the date range keeps its facets",
+          rec2["facets"]["Document Type"] == ["Order"] and ch == [])
+    blank = dict(obs, submitter=None, company={"name": None, "id": None})
+    rec2, ch = merge(rec, "4642410", blank, {}, {}, True, [box], set(), when2)
+    check("an empty value does not blank a recorded one",
+          rec2["submitter"] == obs["submitter"] and rec2["company"] == obs["company"] and ch == [])
+    rec2, _ = merge(rec, "4642410", obs, {}, {}, True, [], set(), when2)
+    check("a membership survives a filing that was not read", rec2["containers"] == [box])
+    rec2, ch = merge(rec, "4642410", obs, {}, {}, True, [], {"4642409"}, when2)
+    check("a membership is dropped when its filing was read in full without it",
+          rec2["containers"] == [] and [c["field"] for c in ch] == ["containers"])
+
+    for passed, name in results:
+        print(f"{'ok  ' if passed else 'FAIL'} {name}")
+    failed = sum(1 for p, _ in results if not p)
+    print(f"{len(results) - failed}/{len(results)} checks pass")
+    return 1 if failed else 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1103,12 +1223,13 @@ def main() -> int:
     n.add_argument("--dry-run", action="store_true")
     d = sub.add_parser("download", help="fetch recorded PDFs not already in source/")
     d.add_argument("--limit", type=int)
+    sub.add_parser("selftest", help="check parsers and rules against saved pages, offline")
     e = sub.add_parser("seed", help="one-off: build records from cer-regdocs2 sidecars")
     e.add_argument("sidecars")
     e.add_argument("--force", action="store_true")
     args = p.parse_args()
     return {"scout": cmd_scout, "doc": cmd_doc, "missing": cmd_missing,
-            "download": cmd_download, "seed": cmd_seed}[args.cmd](args)
+            "download": cmd_download, "seed": cmd_seed, "selftest": cmd_selftest}[args.cmd](args)
 
 
 if __name__ == "__main__":

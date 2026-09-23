@@ -1,2 +1,7 @@
+# extraction (ingest.py)
 docling>=2.129.0
 pypdfium2>=5.13.0
+# finding and fetching filings (scout.py)
+httpx>=0.28
+beautifulsoup4>=4.12
+lxml>=5.0

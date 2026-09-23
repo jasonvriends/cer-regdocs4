@@ -4,9 +4,5 @@ __pycache__/
 output*/
 *.part
 source/
-inventory/
-ledger.db
-ledger.db-wal
-ledger.db-shm
 batch.log
 *.log
