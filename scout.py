@@ -41,6 +41,7 @@ holds nothing but the documents themselves, and so ingest.py -- which reads a
 from __future__ import annotations
 
 import argparse
+import calendar
 import hashlib
 import json
 import random
@@ -140,6 +141,35 @@ def normalize_date(value: str) -> str | None:
         except ValueError:
             return None
     return None
+
+
+def parse_day(value: str) -> str:
+    """A YYYY-MM-DD date, with a day past the end of its month clamped to the last.
+
+    REGDOCS does not reject an impossible date; it silently drops it. An end
+    date of 2026-09-31 becomes "until today", and a start date of 2026-02-30
+    becomes "since 2002" -- about 550,000 items. So a date is made valid here,
+    before it can reach a request, and anything that cannot be made valid is
+    refused rather than guessed at.
+    """
+    parts = clean(value).split("-")
+    if (len(parts) != 3 or not all(p.isdigit() for p in parts)
+            or len(parts[0]) != 4 or not 1 <= len(parts[1]) <= 2 or not 1 <= len(parts[2]) <= 2):
+        raise ValueError(f"{value!r} is not a YYYY-MM-DD date")
+    year, month, day = map(int, parts)
+    # A short or mistyped year is still a date REGDOCS accepts, and every
+    # filing falls after it, so the row-date check below cannot catch it.
+    if not 1990 <= year <= date.today().year + 1:
+        raise ValueError(f"{value!r}: year {year} is outside REGDOCS's range")
+    if not 1 <= month <= 12:
+        raise ValueError(f"{value!r}: month must be 1-12")
+    if day < 1:
+        raise ValueError(f"{value!r}: day must be at least 1")
+    return f"{year:04d}-{month:02d}-{min(day, calendar.monthrange(year, month)[1]):02d}"
+
+
+class RangeIgnored(RuntimeError):
+    """REGDOCS returned rows outside the dates it was asked for."""
 
 
 def is_container_kind(v) -> bool:
@@ -447,15 +477,27 @@ def crawl_search(http: Http, params: dict) -> tuple[dict[str, Row], bool]:
 
     REGDOCS labels its total "about", so it is used to plan pages, not to judge
     completeness; a final probe past the last full page catches any overrun.
+
+    Every row's date is checked against the range asked for. A row outside it
+    means REGDOCS ignored the range -- which it does silently for a date it
+    cannot parse -- and the search stops at once rather than walking the whole
+    archive.
     """
     base = {**params, "srt": SORT_OLDEST_FIRST}
+    lo, hi = params.get("sd"), params.get("ed")
     rows: dict[str, Row] = {}
 
     def page(offset: int):
         ok, html, _, _ = http.get(RESULTS_URL, params={**base, "sr": offset}, ajax=True)
         if ok and not recognized(html):
             ok = False
-        return ok, (parse_rows(html) if ok else []), html
+        got = parse_rows(html) if ok else []
+        for r in got:
+            if lo and hi and r.date and not lo <= r.date <= hi:
+                raise RangeIgnored(f"asked for {lo}..{hi}, REGDOCS returned a row dated "
+                                   f"{r.date} (total about {parse_total(html or '')}); "
+                                   f"it did not apply the date range")
+        return ok, got, html
 
     ok, first, html = page(1)
     if not ok:
@@ -686,7 +728,17 @@ def is_pdf_kind(kind) -> bool:
 # commands
 
 def cmd_scout(args) -> int:
-    start, end = args.date_from, args.date_to
+    try:
+        start, end = parse_day(args.date_from), parse_day(args.date_to)
+    except ValueError as exc:
+        print(f"refusing: {exc}")
+        return 2
+    for given, used, flag in ((args.date_from, start, "--from"), (args.date_to, end, "--to")):
+        if clean(given) != used:
+            print(f"{flag} {given} adjusted to {used} (the last day of that month)")
+    if start > end:
+        print(f"refusing: --from {start} is after --to {end}")
+        return 2
     when = now()
     log = print
     http = Http()
@@ -699,6 +751,11 @@ def cmd_scout(args) -> int:
         boxes = expand_containers(http, rows, log) if any(
             is_container_kind(r.kind) for r in base.values()) else {}
         facets, facets_done = scout_facets(http, start, end, log)
+    except RangeIgnored as exc:
+        # Nothing has been written yet; stopping here leaves every record as it was.
+        log(f"STOPPED: {exc}")
+        log("nothing written")
+        return 2
     finally:
         http.close()
     if not base_ok:

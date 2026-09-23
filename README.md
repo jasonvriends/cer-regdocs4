@@ -133,6 +133,15 @@ a non-empty value, a facet is replaced outright only when every search for it
 finished, and a filing membership is dropped only when that filing was read in
 full without the document in it.
 
+Dates are checked before any request. A day past the end of its month is
+clamped (`--to 2026-09-31` runs to `2026-09-30`, and says so); anything else
+malformed is refused. This matters more than it looks: **REGDOCS does not
+reject an impossible date, it drops it.** An end date of `2026-09-31` silently
+becomes "until today", and a start date of `2026-02-30` becomes "since 2002",
+about 550,000 items. As a second guard, every result row's date is checked
+against the range asked for, and the scout stops before writing anything if
+REGDOCS returns a row outside it.
+
 Requests are paced at one every 2-4 seconds, one at a time. The one-day scout
 above took 180 requests, about ten minutes, most of them the 156 facet
 searches. Longer ranges need more pages per search and more containers, so
