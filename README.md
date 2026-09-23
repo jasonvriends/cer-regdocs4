@@ -30,11 +30,18 @@ Output is written per **run of settings**, not per document:
 
 ```
 output/<id>/
+  <id>.cer.meta.json              what the regulator says: filing, parties, facets
   runs.json                       one line per run: settings in, results out
-  <run>/ingest.py                 the script that produced it, verbatim
   <run>/<id>.docling.json.gz      the document: structure, tables, provenance
   <run>/<id>.docling.meta.json    provenance, settings, per-page quality, doubts
+  az<hash>/<id>.azure.json.gz     the reference extraction, merged from parts
+  az<hash>/<id>.azure.meta.json   which code and analyzer version produced it
 ```
+
+The script behind each run is kept under `runs/<run id>`. `cer.meta.json`
+sits in the document folder rather than a run folder because nothing ran to
+produce it: it is a fact about the filing, written by `tools/import_cer.py`.
+The reference extraction is written by `tools/import_azure.py`.
 
 `runs.json` is derived and safe to delete — the next ingest rebuilds it from
 whatever run directories exist. Each run keeps a copy of `ingest.py`: the meta
