@@ -30,7 +30,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "output"
 SIDECARS = ROOT.parent / "cer-regdocs2/workspace/2_download/files"
-CER_SCHEMA = 1
+CER_SCHEMA = 2
 
 
 def _one(v):
@@ -51,7 +51,6 @@ def build(doc_id: str, side: dict) -> dict:
     detail = m.get("detail_page") or {}
     facets = m.get("facets") or {}
     collected = (m.get("collection") or {}).get("facets") or {}
-    container = (m.get("container_memberships") or [None])[0] or {}
     pdf = ROOT / "source" / f"{doc_id}.pdf"
     return {
         "cer_schema": CER_SCHEMA,
@@ -68,12 +67,17 @@ def build(doc_id: str, side: dict) -> dict:
             "filing_number": side.get("filing_number"),
             "filing_id": m.get("filing_id"),
             "filing_date": side.get("filing_date"),
-            "container": {
-                "id": container.get("container_id"),
-                "kind": container.get("container_kind"),
-                "title": container.get("container_title"),
-            } if container else None,
+            # Every filing this document belongs to. Usually one, sometimes
+            # none, and occasionally many: a single letter sent to several
+            # companies sits in a filing for each. Keeping only the first
+            # silently dropped the rest.
+            "containers": [{
+                "id": c.get("container_id"),
+                "kind": c.get("container_kind"),
+                "title": c.get("container_title"),
+            } for c in (m.get("container_memberships") or [])],
             "project": side.get("project"),
+            "project_id": m.get("project_id"),
         },
         # company_id is the stable key. The two names often spell the same
         # company differently, and company is absent on about a quarter of
