@@ -128,6 +128,43 @@ refreshed. Every change is kept, so re-tagging by REGDOCS is visible over time:
 ]
 ```
 
+### Recording a document you already have
+
+A PDF that arrived without being scouted -- fetched with `ingest.py <url>`, or
+copied into `source/` -- has no record, so its extraction carries no filing
+number, company or facets. `tools/status.py` lists these. To give them one:
+
+```bash
+.venv/bin/python scout.py doc 4642410 4647200   # specific documents
+.venv/bin/python scout.py missing               # every PDF in source/ without a record
+```
+
+```
+1 PDF(s) in source/ without a record
+  4642410: 2026-01-05 -- from filing 4642409
+
+1 document(s) filed 2026-01-05
+scouting 2026-01-05 .. 2026-01-05
+...
+                        skipped: not requested: 16
+                                           new: 1
+recorded 1 of 1
+```
+
+The scout works by date, and a document's own REGDOCS page does not state its
+date -- the only date on it is the project's. So each document's date is read
+from its row in the filing its page names as parent, and then that one day is
+scouted, writing a record for the requested documents only. Documents filed
+the same day share a scout. It costs about as much as a one-day scout, almost
+all of it the facet searches. A document that is in no filing, or whose filing
+does not list it, is reported rather than guessed at; scout a date range that
+includes it instead.
+
+The record is separate from the extraction, so it can be added at any time
+without re-running `ingest.py`.
+
+### What a partial scrape cannot do
+
 A scrape that partly fails cannot erase anything: a field is only replaced by
 a non-empty value, a facet is replaced outright only when every search for it
 finished, and a filing membership is dropped only when that filing was read in
@@ -268,19 +305,19 @@ Scout the date it was filed and download it:
 .venv/bin/python scout.py download
 ```
 
-That gives it a record as well as a file. A single URL also works, straight
-into the extractor, landing in `source/` under the document id -- but without a
-record, so the extraction has no filing number, company or facets beside it:
+That gives it a record as well as a file. If you only have its id or URL, fetch
+and extract it directly, then give it a record:
 
 ```bash
 .venv/bin/python ingest.py https://apps.cer-rec.gc.ca/REGDOCS/File/Download/4647200
+.venv/bin/python scout.py doc 4647200
 ```
 
 ## Tools
 
 | | |
 |---|---|
-| `tools/status.py` | which documents did not finish, and where each one stopped |
+| `tools/status.py` | which documents did not finish, where each one stopped, and which PDFs have no CER record |
 | `tools/triage.py` | sorts pages into review tiers from the stored doubts; a policy, versioned separately from extraction |
 | `tools/coverage.py` | page coverage against the reference extraction |
 | `tools/import_azure.py` | lands the reference extraction beside ours, merged from its parts |

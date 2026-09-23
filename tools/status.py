@@ -72,6 +72,17 @@ def main() -> int:
             print(f"{doc_id:>10} {run_dir.name:>9} {state:>12}  {where}; "
                   f"{chunks} page(s) banked, re-run to resume")
             incomplete.append((doc_id, where, chunks))
+    # A PDF fetched without scouting it (ingest.py <url>, or a file copied in)
+    # has no record, so its extraction carries no filing number, company or
+    # facets. That is not an extraction failure and does not change the exit
+    # code, but it should not go unnoticed.
+    source = root.parent / "source"
+    unrecorded = sorted(p.stem for p in source.glob("*.pdf")
+                        if not (root / p.stem / f"{p.stem}.cer.meta.json").exists())
+    if unrecorded:
+        print(f"\n{len(unrecorded)} PDF(s) with no CER record: "
+              + ", ".join(unrecorded[:10]) + (" ..." if len(unrecorded) > 10 else ""))
+        print("  scout.py missing   gives them one")
     if incomplete:
         print(f"\n{len(incomplete)} document(s) did not finish:")
         for doc_id, where, chunks in incomplete:

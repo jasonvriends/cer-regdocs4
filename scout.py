@@ -2,6 +2,8 @@
 """Find REGDOCS filings, record what REGDOCS says about them, and fetch them.
 
     python scout.py scout --from 2026-01-01 --to 2026-07-31 [--dry-run]
+    python scout.py doc 4647200 [4692360 ...] [--dry-run]
+    python scout.py missing [--dry-run]
     python scout.py download [--limit N]
     python scout.py seed ../cer-regdocs2/workspace/2_download/files
 
@@ -532,13 +534,48 @@ def crawl_search(http: Http, params: dict) -> tuple[dict[str, Row], bool]:
     return rows, not failed
 
 
-def expand_containers(http: Http, rows: dict[str, Row], log) -> dict[str, tuple[Row, set[str], bool]]:
-    """Walk Compound Documents and Folders to their members.
+def read_container(http: Http, box_id: str) -> tuple[dict[str, Row], bool, str | None]:
+    """One container's members. -> (members, complete, error)
 
-    Returns container id -> (container row, member ids, complete). Membership
-    counts as complete only when the parsed rows reach REGDOCS's own total or
-    it explicitly says the container is empty; anything less is recorded as
-    incomplete so it cannot be used to remove a membership.
+    Membership counts as complete only when the parsed rows reach REGDOCS's own
+    total or it explicitly says the container is empty; anything less is
+    incomplete, so it cannot be used to remove a membership.
+    """
+    shell_url = VIEW_URL.format(id=box_id)
+    ok, shell, final, err = http.get(shell_url)
+    if not ok:
+        return {}, False, f"shell failed ({err})"
+    endpoint = container_endpoint(shell, final or shell_url, box_id)
+    if not endpoint:
+        return {}, False, "no member-list endpoint declared"
+    members: dict[str, Row] = {}
+    total, empty, failed, url, visited = None, False, False, endpoint, set()
+    while url and url not in visited:
+        visited.add(url)
+        ok, frag, ffinal, err = http.get(url, ajax=True, referer=final or shell_url)
+        if not ok or not recognized(frag):
+            failed = True
+            break
+        t = parse_total(frag)
+        if t is not None:
+            total = max(total or 0, t)
+        got = parse_rows(frag, container_id=box_id)
+        if not got and explicit_empty(frag):
+            empty = True
+        for m in got:
+            if m.document_id != box_id:
+                members.setdefault(m.document_id, m)
+        nxt = next_container_page(frag, ffinal or url)
+        url = nxt if nxt and nxt not in visited else None
+    if total is None and not members and empty:
+        total = 0
+    return members, (not failed and total is not None and len(members) >= total), None
+
+
+def expand_containers(http: Http, rows: dict[str, Row], log) -> dict[str, tuple[Row, set[str], bool]]:
+    """Walk Compound Documents and Folders to their members, nested ones included.
+
+    Returns container id -> (container row, member ids, complete).
     """
     seeds = [r for r in rows.values() if is_container_kind(r.kind)]
     queue = deque((r, 0) for r in seeds)
@@ -550,40 +587,11 @@ def expand_containers(http: Http, rows: dict[str, Row], log) -> dict[str, tuple[
         if box.document_id in seen:
             continue
         seen.add(box.document_id)
-        shell_url = VIEW_URL.format(id=box.document_id)
-        ok, shell, final, err = http.get(shell_url)
-        if not ok:
-            log(f"  container {box.document_id}: shell failed ({err})")
-            result[box.document_id] = (box, set(), False)
-            continue
-        endpoint = container_endpoint(shell, final or shell_url, box.document_id)
-        if not endpoint:
-            log(f"  container {box.document_id}: no member-list endpoint declared")
-            result[box.document_id] = (box, set(), False)
-            continue
-        members: dict[str, Row] = {}
-        total, empty, failed, url, visited = None, False, False, endpoint, set()
-        while url and url not in visited:
-            visited.add(url)
-            ok, frag, ffinal, err = http.get(url, ajax=True, referer=final or shell_url)
-            if not ok or not recognized(frag):
-                failed = True
-                break
-            t = parse_total(frag)
-            if t is not None:
-                total = max(total or 0, t)
-            got = parse_rows(frag, container_id=box.document_id)
-            if not got and explicit_empty(frag):
-                empty = True
-            for m in got:
-                if m.document_id != box.document_id:
-                    members.setdefault(m.document_id, m)
-            nxt = next_container_page(frag, ffinal or url)
-            url = nxt if nxt and nxt not in visited else None
-        if total is None and not members and empty:
-            total = 0
-        complete = not failed and total is not None and len(members) >= total
+        members, complete, err = read_container(http, box.document_id)
         result[box.document_id] = (box, set(members), complete)
+        if err:
+            log(f"  container {box.document_id}: {err}")
+            continue
         for m in members.values():
             rows.setdefault(m.document_id, m)
             if (is_container_kind(m.kind) and m.document_id not in queued
@@ -593,6 +601,47 @@ def expand_containers(http: Http, rows: dict[str, Row], log) -> dict[str, tuple[
         log(f"  container {box.document_id}: {len(members)} member(s), "
             f"{'complete' if complete else 'INCOMPLETE'}")
     return result
+
+
+def breadcrumb_parent(html: str, doc_id: str) -> str | None:
+    """The item a document's page names as its immediate parent -- its filing.
+
+    A REGDOCS page's breadcrumb runs from the site root through commodity,
+    company and project down to the filing the document sits in, each an
+    Item/View link. The last of those that is not the document itself is the
+    filing.
+    """
+    crumb = BeautifulSoup(html, "lxml").select_one("ol.breadcrumb")
+    if not isinstance(crumb, Tag):
+        return None
+    ids = [m.group(2) for a in crumb.find_all("a", href=True)
+           if (m := ITEM_HREF_RE.search(a["href"])) and m.group(2) != doc_id]
+    return ids[-1] if ids else None
+
+
+def find_date(http: Http, doc_id: str) -> tuple[str | None, str]:
+    """A document's filing date, found without knowing it in advance.
+
+    The scout searches by date, and a document's own page does not state its
+    date -- the only date on it is the project's. So the date is read from the
+    document's row in its filing's member list, found through the breadcrumb.
+    -> (date or None, how it was found or why not)
+    """
+    ok, html, _, err = http.get(VIEW_URL.format(id=doc_id))
+    if not ok:
+        return None, f"its page is unavailable ({err})"
+    parent = breadcrumb_parent(html, doc_id)
+    if not parent:
+        return None, "its page names no filing"
+    members, _, err = read_container(http, parent)
+    if err:
+        return None, f"its filing {parent}: {err}"
+    row = members.get(doc_id)
+    if row is None or not row.date:
+        return None, f"its filing {parent} does not list it with a date"
+    if not is_pdf_kind(row.kind):
+        return None, f"it is {row.kind or 'of unknown kind'}, not a PDF"
+    return row.date, f"from filing {parent}"
 
 
 def scout_facets(http: Http, start: str, end: str, log):
@@ -739,9 +788,24 @@ def cmd_scout(args) -> int:
     if start > end:
         print(f"refusing: --from {start} is after --to {end}")
         return 2
-    when = now()
-    log = print
     http = Http()
+    try:
+        code, _ = scout_range(http, start, end, only=None, dry_run=args.dry_run, log=print)
+    finally:
+        http.close()
+    return code
+
+
+def scout_range(http: Http, start: str, end: str, *, only: set[str] | None,
+                dry_run: bool, log) -> tuple[int, set[str]]:
+    """Scout one date range and fold what it finds into the records.
+
+    With `only`, the whole range is still read -- facets and containers can
+    only be learned that way -- but records are written for those documents
+    alone. -> (exit code, ids recorded)
+    """
+    when = now()
+    written: set[str] = set()
     try:
         log(f"scouting {start} .. {end}")
         base, base_ok = crawl_search(http, {"sd": start, "ed": end})
@@ -755,9 +819,7 @@ def cmd_scout(args) -> int:
         # Nothing has been written yet; stopping here leaves every record as it was.
         log(f"STOPPED: {exc}")
         log("nothing written")
-        return 2
-    finally:
-        http.close()
+        return 2, written
     if not base_ok:
         # An incomplete base search is still worth recording, but it says less.
         log("base search incomplete: records are updated, nothing is removed")
@@ -782,6 +844,9 @@ def cmd_scout(args) -> int:
         if not is_pdf_kind(row.kind):
             tally[f"skipped: {row.kind or 'unknown kind'}"] += 1
             continue
+        if only is not None and doc_id not in only:
+            tally["skipped: not requested"] += 1
+            continue
         path = record_path(doc_id)
         old = read_record(doc_id)
         rec, changes = merge(old, doc_id, record_from_row(row), facets.get(doc_id, {}),
@@ -795,19 +860,74 @@ def cmd_scout(args) -> int:
                 changed_fields[c["field"]] += 1
         else:
             tally["unchanged"] += 1
-        if not args.dry_run:
+        written.add(doc_id)
+        if not dry_run:
             path.parent.mkdir(parents=True, exist_ok=True)
             write_json(path, rec)
-    log(f"\n{http.requests} request(s)")
+    log(f"\n{http.requests} request(s) so far")
     for k, v in sorted(tally.items(), key=lambda kv: -kv[1]):
         log(f"  {k:>44}: {v}")
     if changed_fields:
         log("  fields that changed:")
         for k, v in sorted(changed_fields.items(), key=lambda kv: -kv[1]):
             log(f"    {k:>40}: {v}")
-    if args.dry_run:
+    if dry_run:
         log("\ndry run; nothing written")
-    return 0 if base_ok else 1
+    return (0 if base_ok else 1), written
+
+
+def record_documents(ids: list[str], dry_run: bool) -> int:
+    """Give specific documents a record: find each one's date, scout those days.
+
+    Documents filed on the same day share one scout. A document whose date
+    cannot be found is reported, not guessed at.
+    """
+    bad = [i for i in ids if not i.isdigit()]
+    if bad:
+        print(f"refusing: not REGDOCS document ids: {', '.join(bad)}")
+        return 2
+    http = Http()
+    by_date: dict[str, list[str]] = defaultdict(list)
+    unplaced: dict[str, str] = {}
+    recorded: set[str] = set()
+    code = 0
+    try:
+        for doc_id in ids:
+            day, how = find_date(http, doc_id)
+            print(f"  {doc_id}: {day or 'NOT PLACED'} -- {how}")
+            if day:
+                by_date[day].append(doc_id)
+            else:
+                unplaced[doc_id] = how
+        for day, group in sorted(by_date.items()):
+            print(f"\n{len(group)} document(s) filed {day}")
+            c, got = scout_range(http, day, day, only=set(group), dry_run=dry_run, log=print)
+            recorded |= got
+            code = max(code, c)
+    finally:
+        http.close()
+    missed = [i for g in by_date.values() for i in g if i not in recorded]
+    print(f"\nrecorded {len(recorded)} of {len(ids)}")
+    for doc_id, why in unplaced.items():
+        print(f"  {doc_id}: not placed -- {why}; scout a date range that includes it")
+    for doc_id in missed:
+        print(f"  {doc_id}: not in its day's search results")
+    return max(code, 1 if (unplaced or missed) else 0)
+
+
+def cmd_doc(args) -> int:
+    return record_documents(args.ids, args.dry_run)
+
+
+def cmd_missing(args) -> int:
+    """Every PDF in source/ that has no record, e.g. one fetched with ingest.py <url>."""
+    ids = sorted(p.stem for p in SOURCE.glob("*.pdf") if read_record(p.stem) is None)
+    print(f"{len(ids)} PDF(s) in source/ without a record")
+    if not ids:
+        return 0
+    if args.limit:
+        ids = ids[:args.limit]
+    return record_documents(ids, args.dry_run)
 
 
 def sniff(first: bytes) -> tuple[str, str]:
@@ -975,13 +1095,20 @@ def main() -> int:
     s.add_argument("--from", dest="date_from", required=True, help="YYYY-MM-DD")
     s.add_argument("--to", dest="date_to", required=True, help="YYYY-MM-DD")
     s.add_argument("--dry-run", action="store_true", help="report changes without writing")
+    o = sub.add_parser("doc", help="record specific documents by id")
+    o.add_argument("ids", nargs="+")
+    o.add_argument("--dry-run", action="store_true")
+    n = sub.add_parser("missing", help="record every PDF in source/ that has no record")
+    n.add_argument("--limit", type=int)
+    n.add_argument("--dry-run", action="store_true")
     d = sub.add_parser("download", help="fetch recorded PDFs not already in source/")
     d.add_argument("--limit", type=int)
     e = sub.add_parser("seed", help="one-off: build records from cer-regdocs2 sidecars")
     e.add_argument("sidecars")
     e.add_argument("--force", action="store_true")
     args = p.parse_args()
-    return {"scout": cmd_scout, "download": cmd_download, "seed": cmd_seed}[args.cmd](args)
+    return {"scout": cmd_scout, "doc": cmd_doc, "missing": cmd_missing,
+            "download": cmd_download, "seed": cmd_seed}[args.cmd](args)
 
 
 if __name__ == "__main__":
