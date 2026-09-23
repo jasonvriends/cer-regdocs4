@@ -845,6 +845,26 @@ a deliberate second run:
   test separates it, provided dense numeric tables are told apart by the
   presence of running words.
 
+And the run id itself, which has a flaw in each direction:
+
+- **Too sensitive.** It hashes the file's text, so fixing a docstring or adding
+  a comment gives every document a new run id. Hash the syntax tree instead,
+  with docstrings removed: comments and formatting never reach the tree, so
+  they cannot change the id, while any change that executes still does.
+  Prototyped on `runs/0dd494e0.py` -- a fixed docstring and added comments keep
+  the id; a reworded log message and a changed `RASTER_SCALE` both change it.
+  A hand-bumped `EXTRACTION_VERSION` would cover log edits too, but forgetting
+  to bump it silently puts two extractions under one id, which is the failure
+  the id exists to prevent. Keep the exact file hash in the meta as provenance;
+  only the signature changes.
+- **Not sensitive enough.** The docling and OCR model versions are recorded in
+  the meta but are not in the signature, so an upgrade that changes the output
+  keeps the same run id, and new documents land beside old ones with nothing
+  in the id to tell them apart.
+
+Changing how the id is computed changes the id, so this cannot be applied to
+`0dd494e0` retroactively; it belongs in the same run.
+
 Also for that run: pdfplumber as a second opinion on tables (§14.4), whose
 disagreement with docling is the only reference-free signal found for grid
 under-segmentation; and the module docstring, which still gives the chunk
